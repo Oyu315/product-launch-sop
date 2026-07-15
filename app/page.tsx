@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 type Phase = "before" | "submission" | "after";
+type View = "sop" | "platforms" | "editor" | "document";
 
 type DocumentBlock =
   | { id: string; type: "text"; title: string; body: string }
@@ -294,11 +295,12 @@ function normalizeModules(rawModules: SavedModule[]): PlatformModule[] {
 }
 
 export default function Home() {
-  const [activeView, setActiveView] = useState<"sop" | "platforms">("sop");
+  const [activeView, setActiveView] = useState<View>("sop");
   const [selectedPlatform, setSelectedPlatform] = useState(ALL_PLATFORMS);
   const [completed, setCompleted] = useState<string[]>(["version-scope"]);
   const [modules, setModules] = useState<PlatformModule[]>(defaultModules);
   const [editingModuleId, setEditingModuleId] = useState(defaultModules[0].id);
+  const [readingModuleId, setReadingModuleId] = useState(defaultModules[0].id);
   const [taskLinks, setTaskLinks] = useState<Record<string, string>>(defaultTaskLinks);
   const [toast, setToast] = useState("");
   const [loaded, setLoaded] = useState(false);
@@ -357,6 +359,7 @@ export default function Home() {
   const progress = Math.round((completedCount / totalCount) * 100);
   const requiredLeft = defaultTasks.filter((task) => task.required && !completed.includes(task.id)).length;
   const activeModule = modules.find((module) => module.id === editingModuleId) ?? modules[0] ?? defaultModules[0];
+  const readingModule = modules.find((module) => module.id === readingModuleId) ?? modules[0] ?? defaultModules[0];
 
   function notify(message: string) {
     setToast(message);
@@ -380,9 +383,13 @@ export default function Home() {
   }
 
   function openModule(moduleId: string) {
+    setReadingModuleId(moduleId);
+    setActiveView("document");
+  }
+
+  function editModule(moduleId: string) {
     setEditingModuleId(moduleId);
-    setSelectedPlatform(moduleId);
-    setActiveView("platforms");
+    setActiveView("editor");
   }
 
   function updateActiveModule(patch: Partial<PlatformModule>) {
@@ -466,7 +473,7 @@ export default function Home() {
     };
     setModules((current) => [...current, newModule]);
     setEditingModuleId(id);
-    setSelectedPlatform(id);
+    setActiveView("editor");
     notify("已新增平台配置模块");
   }
 
@@ -484,6 +491,7 @@ export default function Home() {
       Object.fromEntries(Object.entries(current).map(([taskId, moduleId]) => [taskId, moduleId === id ? "" : moduleId])),
     );
     setEditingModuleId(fallbackId);
+    if (readingModuleId === id) setReadingModuleId(fallbackId);
     if (selectedPlatform === id) setSelectedPlatform(ALL_PLATFORMS);
     notify("已删除该平台配置模块");
   }
@@ -495,8 +503,28 @@ export default function Home() {
     setTaskLinks(defaultTaskLinks);
     setSelectedPlatform(ALL_PLATFORMS);
     setEditingModuleId(defaultModules[0].id);
+    setReadingModuleId(defaultModules[0].id);
     notify("已恢复默认模板");
   }
+
+  const viewHeading = {
+    sop: {
+      title: "主 SOP 流程",
+      description: "按流程勾选，必要步骤可关联到对应平台模块，点击后直接跳转配置。",
+    },
+    platforms: {
+      title: "平台配置模块",
+      description: "集中查看各平台的上线配置说明与核对进度。",
+    },
+    editor: {
+      title: "模块编辑",
+      description: "选择平台模块，维护名称、核对项以及由文字、图片和链接组成的文档内容。",
+    },
+    document: {
+      title: readingModule.name,
+      description: readingModule.summary,
+    },
+  }[activeView];
 
   return (
     <main className="app-shell">
@@ -513,32 +541,31 @@ export default function Home() {
           <button className={activeView === "sop" ? "nav-item active" : "nav-item"} onClick={() => setActiveView("sop")}>
             <span className="nav-icon">◎</span> 主 SOP 流程
           </button>
-          <button className={activeView === "platforms" ? "nav-item active" : "nav-item"} onClick={() => setActiveView("platforms")}>
+          <button className={activeView === "platforms" || activeView === "document" ? "nav-item active" : "nav-item"} onClick={() => setActiveView("platforms")}>
             <span className="nav-icon">▦</span> 平台配置模块
+          </button>
+          <button className={activeView === "editor" ? "nav-item active" : "nav-item"} onClick={() => setActiveView("editor")}>
+            <span className="nav-icon">✎</span> 模块编辑
           </button>
         </nav>
 
         <button className="reset-button" onClick={resetTemplate}>恢复模板</button>
       </aside>
 
-      <section className="content">
-        <header className="tool-header">
+      <section className={activeView === "document" ? "content document-mode" : "content"}>
+        {activeView !== "document" && <header className="tool-header">
           <div>
             <div className="eyebrow">PRODUCT RELEASE SOP</div>
-            <h1>{activeView === "sop" ? "主 SOP 流程" : "平台配置模块"}</h1>
-            <p>
-              {activeView === "sop"
-                ? "按流程勾选，必要步骤可关联到对应平台模块，点击后直接跳转配置。"
-                : "维护各平台上线前后配置文档，文字、图片和链接都会保存在当前浏览器。"}
-            </p>
+            <h1>{viewHeading.title}</h1>
+            <p>{viewHeading.description}</p>
           </div>
-          <div className="header-stat">
+          {activeView !== "editor" && <div className="header-stat">
             <span>完成进度</span>
             <strong>{progress}%</strong>
-          </div>
-        </header>
+          </div>}
+        </header>}
 
-        <section className="progress-panel" aria-label="上线进度">
+        {(activeView === "sop" || activeView === "platforms") && <section className="progress-panel" aria-label="上线进度">
           <div className="progress-copy">
             <span>总进度</span>
             <strong>{completedCount}</strong>
@@ -550,9 +577,9 @@ export default function Home() {
             <div><span className="stat-dot doing" />待执行 <strong>{totalCount - completedCount}</strong></div>
             <div><span className="stat-dot risk" />必做剩余 <strong>{requiredLeft}</strong></div>
           </div>
-        </section>
+        </section>}
 
-        <div className="platform-filter" role="tablist" aria-label="筛选平台">
+        {(activeView === "sop" || activeView === "platforms") && <div className="platform-filter" role="tablist" aria-label="筛选平台">
           {platformOptions.map((platform) => (
             <button
               key={platform.id}
@@ -564,7 +591,7 @@ export default function Home() {
               {platform.name}
             </button>
           ))}
-        </div>
+        </div>}
 
         {activeView === "sop" ? (
           <section className="flow-panel">
@@ -635,23 +662,76 @@ export default function Home() {
               })}
             </div>
           </section>
-        ) : (
+        ) : activeView === "platforms" ? (
+          <section className="modules-catalog">
+            <div className="section-heading">
+              <div><span className="eyebrow">PLATFORM DOCUMENTS</span><h2>配置文档</h2></div>
+              <span className="quiet-count">{selectedPlatform === ALL_PLATFORMS ? modules.length : 1} 个模块</span>
+            </div>
+
+            <div className="module-grid catalog-grid">
+              {(selectedPlatform === ALL_PLATFORMS ? modules : modules.filter((module) => module.id === selectedPlatform)).map((module) => {
+                const linkedTasks = defaultTasks.filter((task) => taskLinks[task.id] === module.id || task.platformId === module.id);
+                const linkedDone = linkedTasks.filter((task) => completed.includes(task.id)).length;
+                const moduleProgress = linkedTasks.length ? Math.round((linkedDone / linkedTasks.length) * 100) : 0;
+
+                return (
+                  <article
+                    className="module-card document-card"
+                    key={module.id}
+                    role="button"
+                    tabIndex={0}
+                    title="双击打开完整文档"
+                    aria-label={`打开 ${module.name} 完整文档`}
+                    onDoubleClick={() => openModule(module.id)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        openModule(module.id);
+                      }
+                    }}
+                  >
+                    <div className="module-card-main">
+                      <span className="module-logo">{module.shortName || module.name.slice(0, 2)}</span>
+                      <span className="module-card-copy">
+                        <strong>{module.name || "未命名模块"}</strong>
+                        <small>{module.summary || "暂无说明"}</small>
+                      </span>
+                      <span className="module-percent">{moduleProgress}%</span>
+                    </div>
+                    <div className="mini-progress"><div style={{ width: `${moduleProgress}%` }} /></div>
+                    <ul>
+                      {module.checkpoints.slice(0, 4).map((checkpoint) => (
+                        <li key={checkpoint}><span className="list-check" />{checkpoint}</li>
+                      ))}
+                    </ul>
+                    <div className="module-card-footer">
+                      <span>{module.docs.length} 段文档</span>
+                      <span>{module.checkpoints.length} 个检查项</span>
+                      <span className="document-cue" aria-hidden="true">↗</span>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+        ) : activeView === "editor" ? (
           <section className="modules-view">
             <div className="modules-list">
               <div className="section-heading">
-                <div><span className="eyebrow">PLATFORM MODULES</span><h2>配置模块</h2></div>
+                <div><span className="eyebrow">MODULE DIRECTORY</span><h2>选择模块</h2></div>
                 <button className="text-button" onClick={addModule}>新增模块</button>
               </div>
 
               <div className="module-grid">
-                {(selectedPlatform === ALL_PLATFORMS ? modules : modules.filter((module) => module.id === selectedPlatform)).map((module) => {
+                {modules.map((module) => {
                   const linkedTasks = defaultTasks.filter((task) => taskLinks[task.id] === module.id || task.platformId === module.id);
                   const linkedDone = linkedTasks.filter((task) => completed.includes(task.id)).length;
                   const moduleProgress = linkedTasks.length ? Math.round((linkedDone / linkedTasks.length) * 100) : 0;
 
                   return (
                     <article className={activeModule.id === module.id ? "module-card selected" : "module-card"} key={module.id}>
-                      <button className="module-card-main" onClick={() => setEditingModuleId(module.id)}>
+                      <button className="module-card-main" onClick={() => editModule(module.id)}>
                         <span className="module-logo">{module.shortName || module.name.slice(0, 2)}</span>
                         <span className="module-card-copy">
                           <strong>{module.name || "未命名模块"}</strong>
@@ -673,7 +753,10 @@ export default function Home() {
             <section className="editor-panel">
               <div className="section-heading editor-heading">
                 <div><span className="eyebrow">DOCUMENT EDITOR</span><h2>{activeModule.name} 文档</h2></div>
-                <button className="danger-button" onClick={() => removeModule(activeModule.id)}>删除模块</button>
+                <div className="editor-heading-actions">
+                  <button className="text-button" onClick={() => openModule(activeModule.id)}>预览文档</button>
+                  <button className="danger-button" onClick={() => removeModule(activeModule.id)}>删除模块</button>
+                </div>
               </div>
 
               <section className="editor-card">
@@ -787,42 +870,80 @@ export default function Home() {
                 ))}
               </div>
 
-              <section className="document-preview">
-                <div className="preview-heading">
-                  <span className="eyebrow">PREVIEW</span>
-                  <h3>{activeModule.name} 配置说明</h3>
-                </div>
-                {activeModule.docs.map((block) => (
-                  <article className={`preview-block ${block.type}`} key={`${block.id}-preview`}>
-                    {block.type === "text" && (
-                      <>
-                        <h4>{block.title || "未命名段落"}</h4>
-                        <p>{block.body || "暂无正文"}</p>
-                      </>
-                    )}
-                    {block.type === "image" && (
-                      <>
-                        <h4>{block.title || "图片"}</h4>
-                        {block.imageUrl ? <img src={block.imageUrl} alt={block.caption || block.title} /> : <div className="image-placeholder">图片预览</div>}
-                        {block.caption && <p>{block.caption}</p>}
-                      </>
-                    )}
-                    {block.type === "link" && (
-                      <a href={block.url || "#"} target="_blank" rel="noreferrer" onClick={(event) => !block.url && event.preventDefault()}>
-                        <strong>{block.title || "链接标题"}</strong>
-                        <span>{block.url || "未填写链接"}</span>
-                        {block.body && <p>{block.body}</p>}
-                      </a>
-                    )}
-                  </article>
-                ))}
-              </section>
-
               <div className="editor-note">
                 <strong>{defaultTasks.filter((task) => taskLinks[task.id] === activeModule.id || task.platformId === activeModule.id).length}</strong>
                 <span>个 SOP 步骤当前关联到此模块</span>
               </div>
             </section>
+          </section>
+        ) : (
+          <section className="document-page">
+            <div className="document-topbar">
+              <button className="document-back" onClick={() => setActiveView("platforms")}><span aria-hidden="true">←</span> 返回平台模块</button>
+              <button className="text-button" onClick={() => editModule(readingModule.id)}>编辑文档</button>
+            </div>
+
+            <article className="document-sheet">
+              <header className="document-header">
+                <div className="document-identity">
+                  <span className="document-logo">{readingModule.shortName || readingModule.name.slice(0, 2)}</span>
+                  <div>
+                    <span className="eyebrow">PLATFORM CONFIGURATION</span>
+                    <h1>{readingModule.name}</h1>
+                  </div>
+                </div>
+                <p>{readingModule.summary}</p>
+                <div className="document-meta">
+                  <span>{readingModule.docs.length} 个内容章节</span>
+                  <span>{readingModule.checkpoints.length} 个核对项</span>
+                </div>
+              </header>
+
+              {readingModule.checkpoints.length > 0 && (
+                <section className="document-checklist">
+                  <span className="eyebrow">CHECKLIST</span>
+                  <h2>上线核对要点</h2>
+                  <ol>
+                    {readingModule.checkpoints.map((checkpoint, index) => (
+                      <li key={`${checkpoint}-${index}`}><span>{String(index + 1).padStart(2, "0")}</span>{checkpoint}</li>
+                    ))}
+                  </ol>
+                </section>
+              )}
+
+              <div className="document-body">
+                {readingModule.docs.map((block, index) => (
+                  <section className={`document-block ${block.type}`} key={block.id}>
+                    {block.type === "text" && (
+                      <>
+                        <span className="document-section-number">{String(index + 1).padStart(2, "0")}</span>
+                        <h2>{block.title || "未命名段落"}</h2>
+                        <p>{block.body || "暂无正文"}</p>
+                      </>
+                    )}
+                    {block.type === "image" && (
+                      <figure>
+                        <span className="document-section-number">{String(index + 1).padStart(2, "0")}</span>
+                        <h2>{block.title || "图片"}</h2>
+                        {block.imageUrl ? <img src={block.imageUrl} alt={block.caption || block.title} /> : <div className="image-placeholder">暂无图片</div>}
+                        {block.caption && <figcaption>{block.caption}</figcaption>}
+                      </figure>
+                    )}
+                    {block.type === "link" && (
+                      <a className={block.url ? "document-link" : "document-link disabled"} href={block.url || "#"} target="_blank" rel="noreferrer" onClick={(event) => !block.url && event.preventDefault()}>
+                        <span className="document-section-number">{String(index + 1).padStart(2, "0")}</span>
+                        <div>
+                          <h2>{block.title || "相关链接"}</h2>
+                          {block.body && <p>{block.body}</p>}
+                          <small>{block.url || "链接暂未填写"}</small>
+                        </div>
+                        <strong aria-hidden="true">↗</strong>
+                      </a>
+                    )}
+                  </section>
+                ))}
+              </div>
+            </article>
           </section>
         )}
       </section>
