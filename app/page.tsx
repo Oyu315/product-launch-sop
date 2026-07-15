@@ -32,7 +32,24 @@ type PlatformModule = {
 
 type SavedModule = Partial<PlatformModule> & { id?: string; docs?: DocumentBlock[] };
 
+type SharedState = {
+  completed: string[];
+  tasks: SopTask[];
+  phaseTitles: Record<Phase, string>;
+  modules: PlatformModule[];
+  taskLinks: Record<string, string>;
+};
+
+type SharedResponse = {
+  state: Partial<SharedState> | null;
+  updatedAt: string | null;
+  canEdit: boolean;
+  error?: string;
+};
+
 const STORAGE_KEY = "product-launch-sop-tool-v2";
+const EDITOR_KEY_STORAGE = "product-launch-sop-editor-key";
+const SHARED_API_ORIGIN = "https://product-launch-sop-hub.real-1-4436.chatgpt.site";
 const ALL_PLATFORMS = "all";
 
 const phaseMeta: Record<Phase, { label: string; number: string }> = {
@@ -286,6 +303,10 @@ function safeLink(url: string) {
   return /^(https?:\/\/|mailto:|\/|#)/i.test(url) ? url : "#";
 }
 
+function getSharedApiUrl(path: string) {
+  return window.location.hostname.endsWith("github.io") ? `${SHARED_API_ORIGIN}${path}` : path;
+}
+
 function optimizeImage(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -457,49 +478,87 @@ export default function Home() {
   const [taskLinks, setTaskLinks] = useState<Record<string, string>>(defaultTaskLinks);
   const [toast, setToast] = useState("");
   const [loaded, setLoaded] = useState(false);
+  const [editorKey, setEditorKey] = useState("");
+  const [canEdit, setCanEdit] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<"loading" | "readonly" | "saving" | "saved" | "offline">("loading");
   const markdownTextareaRef = useRef<HTMLTextAreaElement>(null);
   const markdownImageInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
+    let cancelled = false;
+    const savedKey = window.localStorage.getItem(EDITOR_KEY_STORAGE) ?? "";
     const saved = window.localStorage.getItem(STORAGE_KEY);
 
     if (saved) {
       try {
-        const data = JSON.parse(saved) as {
-          completed?: string[];
-          tasks?: SopTask[];
-          phaseTitles?: Partial<Record<Phase, string>>;
-          modules?: SavedModule[];
-          taskLinks?: Record<string, string>;
-        };
-        if (Array.isArray(data.completed)) setCompleted(data.completed);
-        if (Array.isArray(data.tasks) && data.tasks.length) setTasks(data.tasks);
-        if (data.phaseTitles) setPhaseTitles({ ...defaultPhaseTitles, ...data.phaseTitles });
-        if (Array.isArray(data.modules) && data.modules.length) {
-          const normalizedModules = normalizeModules(data.modules);
-          setModules(normalizedModules);
-          setEditingModuleId(normalizedModules[0].id);
-        }
-        if (data.taskLinks) setTaskLinks({ ...defaultTaskLinks, ...data.taskLinks });
+        applySharedState(JSON.parse(saved) as Partial<SharedState>);
       } catch {
         window.localStorage.removeItem(STORAGE_KEY);
       }
     }
 
-    setLoaded(true);
+    async function loadSharedState() {
+      try {
+        const response = await fetch(getSharedApiUrl("/api/state"), {
+          headers: savedKey ? { "X-Editor-Key": savedKey } : undefined,
+          cache: "no-store",
+        });
+        const data = (await response.json()) as SharedResponse;
+        if (!response.ok) throw new Error(data.error || "共享数据读取失败");
+        if (cancelled) return;
+
+        if (data.state) applySharedState(data.state);
+        setCanEdit(data.canEdit);
+        setSyncStatus(data.canEdit ? "saved" : "readonly");
+        if (data.canEdit) setEditorKey(savedKey);
+        if (savedKey && !data.canEdit) {
+          window.localStorage.removeItem(EDITOR_KEY_STORAGE);
+          setEditorKey("");
+        }
+      } catch {
+        if (!cancelled) setSyncStatus("offline");
+      } finally {
+        if (!cancelled) setLoaded(true);
+      }
+    }
+
+    void loadSharedState();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
     if (!loaded) return;
+    const state = { completed, tasks, phaseTitles, modules, taskLinks };
     try {
-      window.localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify({ completed, tasks, phaseTitles, modules, taskLinks }),
-      );
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch {
-      setToast("浏览器存储空间不足，请删除部分较大的图片");
+      window.setTimeout(() => setToast("浏览器存储空间不足，请删除部分较大的图片"), 0);
     }
-  }, [completed, loaded, modules, phaseTitles, taskLinks, tasks]);
+
+    if (!canEdit || !editorKey) return;
+    const timer = window.setTimeout(async () => {
+      setSyncStatus("saving");
+      try {
+        const response = await fetch(getSharedApiUrl("/api/state"), {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Editor-Key": editorKey,
+          },
+          body: JSON.stringify({ state }),
+        });
+        const result = (await response.json()) as { error?: string };
+        if (!response.ok) throw new Error(result.error || "同步失败");
+        setSyncStatus("saved");
+      } catch {
+        setSyncStatus("offline");
+      }
+    }, 800);
+
+    return () => window.clearTimeout(timer);
+  }, [canEdit, completed, editorKey, loaded, modules, phaseTitles, taskLinks, tasks]);
 
   const platformOptions = useMemo(
     () => [{ id: ALL_PLATFORMS, name: "全部平台" }, ...modules.map(({ id, name }) => ({ id, name }))],
@@ -524,9 +583,58 @@ export default function Home() {
   const activeModule = modules.find((module) => module.id === editingModuleId) ?? modules[0] ?? defaultModules[0];
   const readingModule = modules.find((module) => module.id === readingModuleId) ?? modules[0] ?? defaultModules[0];
 
+  function applySharedState(data: Partial<SharedState>) {
+    if (Array.isArray(data.completed)) setCompleted(data.completed);
+    if (Array.isArray(data.tasks) && data.tasks.length) setTasks(data.tasks);
+    if (data.phaseTitles) setPhaseTitles({ ...defaultPhaseTitles, ...data.phaseTitles });
+    if (Array.isArray(data.modules) && data.modules.length) {
+      const normalizedModules = normalizeModules(data.modules);
+      setModules(normalizedModules);
+      setEditingModuleId(normalizedModules[0].id);
+      setReadingModuleId(normalizedModules[0].id);
+    }
+    if (data.taskLinks) setTaskLinks({ ...defaultTaskLinks, ...data.taskLinks });
+  }
+
   function notify(message: string) {
     setToast(message);
     window.setTimeout(() => setToast(""), 2200);
+  }
+
+  async function toggleEditorAccess() {
+    if (canEdit) {
+      window.localStorage.removeItem(EDITOR_KEY_STORAGE);
+      setEditorKey("");
+      setCanEdit(false);
+      setIsFlowEditing(false);
+      setActiveView("sop");
+      setSyncStatus("readonly");
+      notify("已退出编辑模式");
+      return;
+    }
+
+    const suppliedKey = window.prompt("请输入编辑密钥");
+    if (!suppliedKey?.trim()) return;
+
+    setSyncStatus("loading");
+    try {
+      const response = await fetch(getSharedApiUrl("/api/state"), {
+        headers: { "X-Editor-Key": suppliedKey.trim() },
+        cache: "no-store",
+      });
+      const data = (await response.json()) as SharedResponse;
+      if (!response.ok || !data.canEdit) throw new Error(data.error || "编辑密钥无效");
+
+      if (data.state) applySharedState(data.state);
+      window.localStorage.setItem(EDITOR_KEY_STORAGE, suppliedKey.trim());
+      setEditorKey(suppliedKey.trim());
+      setCanEdit(true);
+      setSyncStatus("saved");
+      notify("已进入编辑模式");
+    } catch {
+      setSyncStatus("readonly");
+      notify("编辑密钥无效");
+    }
   }
 
   function getPlatformName(id: string) {
@@ -657,17 +765,28 @@ export default function Home() {
 
     try {
       const dataUrl = await optimizeImage(file);
+      const imageBlob = await fetch(dataUrl).then((response) => response.blob());
+      const formData = new FormData();
+      formData.append("file", imageBlob, `${file.name.replace(/\.[^.]+$/, "") || "screenshot"}.webp`);
+      const uploadResponse = await fetch(getSharedApiUrl("/api/images"), {
+        method: "POST",
+        headers: { "X-Editor-Key": editorKey },
+        body: formData,
+      });
+      const uploadResult = (await uploadResponse.json()) as { url?: string; error?: string };
+      if (!uploadResponse.ok || !uploadResult.url) throw new Error(uploadResult.error || "图片上传失败");
+
       const label = file.name.replace(/\.[^.]+$/, "") || "截图";
-      const insertion = `\n\n![${label}](${dataUrl})\n\n`;
+      const insertion = `\n\n![${label}](${uploadResult.url})\n\n`;
       setModules((current) => current.map((module) => {
         if (module.id !== moduleId) return module;
         const safeStart = Math.min(start, module.markdown.length);
         const safeEnd = Math.min(Math.max(end, safeStart), module.markdown.length);
         return { ...module, markdown: `${module.markdown.slice(0, safeStart)}${insertion}${module.markdown.slice(safeEnd)}` };
       }));
-      notify("图片已插入文档");
+      notify("图片已上传并插入文档");
     } catch {
-      notify("图片处理失败，请换一张图片重试");
+      notify("图片上传失败，请稍后重试");
     }
   }
 
@@ -765,12 +884,23 @@ export default function Home() {
           <button className={activeView === "platforms" || activeView === "document" ? "nav-item active" : "nav-item"} onClick={() => setActiveView("platforms")}>
             <span className="nav-icon">▦</span> 平台配置模块
           </button>
-          <button className={activeView === "editor" ? "nav-item active" : "nav-item"} onClick={() => setActiveView("editor")}>
-            <span className="nav-icon">✎</span> 模块编辑
-          </button>
+          {canEdit && (
+            <button className={activeView === "editor" ? "nav-item active" : "nav-item"} onClick={() => setActiveView("editor")}>
+              <span className="nav-icon">✎</span> 模块编辑
+            </button>
+          )}
         </nav>
 
-        <button className="reset-button" onClick={resetTemplate}>恢复模板</button>
+        <div className="sidebar-access">
+          <button className={canEdit ? "access-button connected" : "access-button"} onClick={toggleEditorAccess}>
+            <span className="access-dot" />
+            {canEdit ? "编辑模式" : "输入编辑密钥"}
+          </button>
+          <span className="sync-label">
+            {syncStatus === "loading" ? "正在连接共享数据" : syncStatus === "saving" ? "正在保存" : syncStatus === "saved" ? "共享数据已同步" : syncStatus === "offline" ? "云端暂时离线" : "访客只读"}
+          </span>
+          {canEdit && <button className="reset-button" onClick={resetTemplate}>恢复模板</button>}
+        </div>
       </aside>
 
       <section className={activeView === "document" ? "content document-mode" : "content"}>
@@ -820,9 +950,11 @@ export default function Home() {
               <div><span className="eyebrow">GUIDED FLOW</span><h2>发布执行清单</h2></div>
               <div className="flow-heading-actions">
                 <span className="quiet-count">{filteredTasks.length} 项</span>
-                <button className={isFlowEditing ? "flow-edit-toggle active" : "flow-edit-toggle"} onClick={() => setIsFlowEditing((current) => !current)}>
-                  {isFlowEditing ? "完成编辑" : "编辑流程"}
-                </button>
+                {canEdit && (
+                  <button className={isFlowEditing ? "flow-edit-toggle active" : "flow-edit-toggle"} onClick={() => setIsFlowEditing((current) => !current)}>
+                    {isFlowEditing ? "完成编辑" : "编辑流程"}
+                  </button>
+                )}
               </div>
             </div>
 
@@ -901,7 +1033,7 @@ export default function Home() {
 
                         return (
                           <article className={isDone ? "task-row finished" : "task-row"} key={task.id}>
-                            <button className={isDone ? "check checked" : "check"} aria-label={`完成 ${task.title}`} onClick={() => toggleTask(task.id)}>
+                            <button className={isDone ? "check checked" : "check"} aria-label={`完成 ${task.title}`} disabled={!canEdit} onClick={() => toggleTask(task.id)}>
                               {isDone ? "✓" : ""}
                             </button>
                             <div className="task-main">
@@ -914,23 +1046,25 @@ export default function Home() {
                                 <span className="platform-tag">{getPlatformName(task.platformId)}</span>
                                 <span>{task.due}</span>
                               </div>
-                              <div className="task-link-row">
-                                <select
-                                  aria-label={`为 ${task.title} 关联平台配置模块`}
-                                  value={taskLinks[task.id] ?? ""}
-                                  onChange={(event) => setTaskLinks((current) => ({ ...current, [task.id]: event.target.value }))}
-                                >
-                                  <option value="">不关联模块</option>
-                                  {modules.map((module) => (
-                                    <option value={module.id} key={module.id}>{module.name}</option>
-                                  ))}
-                                </select>
+                              {(canEdit || linkedModule) && <div className="task-link-row">
+                                {canEdit && (
+                                  <select
+                                    aria-label={`为 ${task.title} 关联平台配置模块`}
+                                    value={taskLinks[task.id] ?? ""}
+                                    onChange={(event) => setTaskLinks((current) => ({ ...current, [task.id]: event.target.value }))}
+                                  >
+                                    <option value="">不关联模块</option>
+                                    {modules.map((module) => (
+                                      <option value={module.id} key={module.id}>{module.name}</option>
+                                    ))}
+                                  </select>
+                                )}
                                 {linkedModule && (
                                   <button className="module-jump" onClick={() => openModule(linkedModule.id)}>
                                     打开 {linkedModule.name} <span>→</span>
                                   </button>
                                 )}
-                              </div>
+                              </div>}
                             </div>
                           </article>
                         );
@@ -1128,7 +1262,7 @@ export default function Home() {
           <section className="document-page">
             <div className="document-topbar">
               <button className="document-back" onClick={() => setActiveView("platforms")}><span aria-hidden="true">←</span> 返回平台模块</button>
-              <button className="text-button" onClick={() => editModule(readingModule.id)}>编辑文档</button>
+              {canEdit && <button className="text-button" onClick={() => editModule(readingModule.id)}>编辑文档</button>}
             </div>
 
             <article className="document-sheet">
