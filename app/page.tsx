@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 type Phase = "before" | "submission" | "after";
 type View = "sop" | "platforms" | "editor" | "document";
@@ -27,19 +27,13 @@ type PlatformModule = {
   shortName: string;
   summary: string;
   checkpoints: string[];
-  docs: DocumentBlock[];
+  markdown: string;
 };
 
-type SavedModule = Partial<PlatformModule> & { id?: string };
+type SavedModule = Partial<PlatformModule> & { id?: string; docs?: DocumentBlock[] };
 
 const STORAGE_KEY = "product-launch-sop-tool-v2";
 const ALL_PLATFORMS = "all";
-
-const blockLabels: Record<DocumentBlock["type"], string> = {
-  text: "标题正文",
-  image: "图片",
-  link: "链接",
-};
 
 const phaseMeta: Record<Phase, { label: string; number: string }> = {
   before: { label: "上线前准备", number: "01" },
@@ -47,7 +41,11 @@ const phaseMeta: Record<Phase, { label: string; number: string }> = {
   after: { label: "上线后验证", number: "03" },
 };
 
-const defaultModules: PlatformModule[] = [
+const defaultPhaseTitles = Object.fromEntries(
+  (Object.keys(phaseMeta) as Phase[]).map((phase) => [phase, phaseMeta[phase].label]),
+) as Record<Phase, string>;
+
+const defaultModuleBlocks: Array<Omit<PlatformModule, "markdown"> & { docs: DocumentBlock[] }> = [
   {
     id: "app-store",
     name: "App Store",
@@ -162,6 +160,11 @@ const defaultModules: PlatformModule[] = [
   },
 ];
 
+const defaultModules: PlatformModule[] = defaultModuleBlocks.map(({ docs, ...module }) => ({
+  ...module,
+  markdown: documentBlocksToMarkdown(docs),
+}));
+
 const defaultTasks: SopTask[] = [
   {
     id: "version-scope",
@@ -258,6 +261,120 @@ function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
+function documentBlocksToMarkdown(blocks: DocumentBlock[]) {
+  return blocks
+    .map((block) => {
+      if (block.type === "text") return `## ${block.title}\n\n${block.body}`;
+      if (block.type === "image") {
+        const image = block.imageUrl ? `![${block.caption || block.title}](${block.imageUrl})` : block.caption;
+        return `## ${block.title}\n\n${image}`.trim();
+      }
+
+      const link = block.url ? `[打开相关页面](${block.url})` : "";
+      return `## ${block.title}\n\n${block.body}\n\n${link}`.trim();
+    })
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function getDocumentSectionCount(markdown: string) {
+  const headings = markdown.match(/^#{1,2}\s+.+$/gm)?.length ?? 0;
+  return Math.max(headings, markdown.trim() ? 1 : 0);
+}
+
+function safeLink(url: string) {
+  return /^(https?:\/\/|mailto:|\/|#)/i.test(url) ? url : "#";
+}
+
+function renderInline(text: string, keyPrefix: string): ReactNode[] {
+  const pattern = /(\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\)|<span style="color:#[0-9a-fA-F]{6}">[^<]*<\/span>)/g;
+  const nodes: ReactNode[] = [];
+  let cursor = 0;
+
+  for (const match of text.matchAll(pattern)) {
+    const index = match.index ?? 0;
+    if (index > cursor) nodes.push(text.slice(cursor, index));
+    const token = match[0];
+
+    if (token.startsWith("**")) {
+      nodes.push(<strong key={`${keyPrefix}-${index}`}>{token.slice(2, -2)}</strong>);
+    } else if (token.startsWith("[")) {
+      const linkMatch = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
+      if (linkMatch) {
+        const href = safeLink(linkMatch[2]);
+        nodes.push(<a key={`${keyPrefix}-${index}`} href={href} target="_blank" rel="noreferrer" onClick={(event) => href === "#" && event.preventDefault()}>{linkMatch[1]}</a>);
+      }
+    } else {
+      const colorMatch = token.match(/^<span style="color:(#[0-9a-fA-F]{6})">([^<]*)<\/span>$/);
+      if (colorMatch) nodes.push(<span key={`${keyPrefix}-${index}`} style={{ color: colorMatch[1] }}>{colorMatch[2]}</span>);
+    }
+
+    cursor = index + token.length;
+  }
+
+  if (cursor < text.length) nodes.push(text.slice(cursor));
+  return nodes;
+}
+
+function renderMarkdown(markdown: string) {
+  const lines = markdown.replace(/\r/g, "").split("\n");
+  const nodes: ReactNode[] = [];
+  let paragraph: string[] = [];
+  let listItems: string[] = [];
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    const text = paragraph.join(" ");
+    nodes.push(<p key={`p-${nodes.length}`}>{renderInline(text, `p-${nodes.length}`)}</p>);
+    paragraph = [];
+  };
+
+  const flushList = () => {
+    if (!listItems.length) return;
+    nodes.push(
+      <ul key={`ul-${nodes.length}`}>
+        {listItems.map((item, index) => <li key={`${item}-${index}`}>{renderInline(item, `li-${nodes.length}-${index}`)}</li>)}
+      </ul>,
+    );
+    listItems = [];
+  };
+
+  lines.forEach((line) => {
+    const image = line.match(/^!\[([^\]]*)\]\((.+)\)$/);
+    if (!line.trim()) {
+      flushParagraph();
+      flushList();
+    } else if (image) {
+      flushParagraph();
+      flushList();
+      nodes.push(
+        <figure key={`img-${nodes.length}`}>
+          <img src={image[2]} alt={image[1]} />
+          {image[1] && <figcaption>{image[1]}</figcaption>}
+        </figure>,
+      );
+    } else if (line.startsWith("## ")) {
+      flushParagraph();
+      flushList();
+      nodes.push(<h2 key={`h2-${nodes.length}`}>{renderInline(line.slice(3), `h2-${nodes.length}`)}</h2>);
+    } else if (line.startsWith("# ")) {
+      flushParagraph();
+      flushList();
+      nodes.push(<h1 key={`h1-${nodes.length}`}>{renderInline(line.slice(2), `h1-${nodes.length}`)}</h1>);
+    } else if (line.startsWith("- ")) {
+      flushParagraph();
+      listItems.push(line.slice(2));
+    } else {
+      flushList();
+      paragraph.push(line.trim());
+    }
+  });
+
+  flushParagraph();
+  flushList();
+  return nodes;
+}
+
 function docsFromLegacyModule(module: SavedModule, index: number): DocumentBlock[] {
   const moduleId = module.id ?? `module-${index}`;
   const checkpointText = Array.isArray(module.checkpoints) ? module.checkpoints.join("\n") : "";
@@ -289,7 +406,7 @@ function normalizeModules(rawModules: SavedModule[]): PlatformModule[] {
       shortName: module.shortName || fallback.shortName,
       summary: module.summary || fallback.summary,
       checkpoints: Array.isArray(module.checkpoints) ? module.checkpoints : fallback.checkpoints,
-      docs,
+      markdown: module.markdown || documentBlocksToMarkdown(docs),
     };
   });
 }
@@ -298,12 +415,17 @@ export default function Home() {
   const [activeView, setActiveView] = useState<View>("sop");
   const [selectedPlatform, setSelectedPlatform] = useState(ALL_PLATFORMS);
   const [completed, setCompleted] = useState<string[]>(["version-scope"]);
+  const [tasks, setTasks] = useState<SopTask[]>(defaultTasks);
+  const [phaseTitles, setPhaseTitles] = useState<Record<Phase, string>>(defaultPhaseTitles);
+  const [isFlowEditing, setIsFlowEditing] = useState(false);
   const [modules, setModules] = useState<PlatformModule[]>(defaultModules);
   const [editingModuleId, setEditingModuleId] = useState(defaultModules[0].id);
   const [readingModuleId, setReadingModuleId] = useState(defaultModules[0].id);
   const [taskLinks, setTaskLinks] = useState<Record<string, string>>(defaultTaskLinks);
   const [toast, setToast] = useState("");
   const [loaded, setLoaded] = useState(false);
+  const markdownTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const markdownImageInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     const saved = window.localStorage.getItem(STORAGE_KEY);
@@ -312,10 +434,14 @@ export default function Home() {
       try {
         const data = JSON.parse(saved) as {
           completed?: string[];
+          tasks?: SopTask[];
+          phaseTitles?: Partial<Record<Phase, string>>;
           modules?: SavedModule[];
           taskLinks?: Record<string, string>;
         };
         if (Array.isArray(data.completed)) setCompleted(data.completed);
+        if (Array.isArray(data.tasks) && data.tasks.length) setTasks(data.tasks);
+        if (data.phaseTitles) setPhaseTitles({ ...defaultPhaseTitles, ...data.phaseTitles });
         if (Array.isArray(data.modules) && data.modules.length) {
           const normalizedModules = normalizeModules(data.modules);
           setModules(normalizedModules);
@@ -334,9 +460,9 @@ export default function Home() {
     if (!loaded) return;
     window.localStorage.setItem(
       STORAGE_KEY,
-      JSON.stringify({ completed, modules, taskLinks }),
+      JSON.stringify({ completed, tasks, phaseTitles, modules, taskLinks }),
     );
-  }, [completed, loaded, modules, taskLinks]);
+  }, [completed, loaded, modules, phaseTitles, taskLinks, tasks]);
 
   const platformOptions = useMemo(
     () => [{ id: ALL_PLATFORMS, name: "全部平台" }, ...modules.map(({ id, name }) => ({ id, name }))],
@@ -345,19 +471,19 @@ export default function Home() {
 
   const filteredTasks = useMemo(
     () =>
-      defaultTasks.filter(
+      tasks.filter(
         (task) =>
           selectedPlatform === ALL_PLATFORMS ||
           task.platformId === selectedPlatform ||
           task.platformId === ALL_PLATFORMS,
       ),
-    [selectedPlatform],
+    [selectedPlatform, tasks],
   );
 
-  const completedCount = defaultTasks.filter((task) => completed.includes(task.id)).length;
-  const totalCount = defaultTasks.length;
-  const progress = Math.round((completedCount / totalCount) * 100);
-  const requiredLeft = defaultTasks.filter((task) => task.required && !completed.includes(task.id)).length;
+  const completedCount = tasks.filter((task) => completed.includes(task.id)).length;
+  const totalCount = tasks.length;
+  const progress = totalCount ? Math.round((completedCount / totalCount) * 100) : 0;
+  const requiredLeft = tasks.filter((task) => task.required && !completed.includes(task.id)).length;
   const activeModule = modules.find((module) => module.id === editingModuleId) ?? modules[0] ?? defaultModules[0];
   const readingModule = modules.find((module) => module.id === readingModuleId) ?? modules[0] ?? defaultModules[0];
 
@@ -380,6 +506,47 @@ export default function Home() {
     setCompleted((current) =>
       current.includes(id) ? current.filter((taskId) => taskId !== id) : [...current, id],
     );
+  }
+
+  function updateTask(taskId: string, patch: Partial<SopTask>) {
+    setTasks((current) => current.map((task) => (task.id === taskId ? { ...task, ...patch } : task)));
+  }
+
+  function addTaskNear(referenceId: string | null, phase: Phase, position: "before" | "after") {
+    const id = createId("task");
+    const newTask: SopTask = {
+      id,
+      title: "新流程步骤",
+      detail: "补充需要执行和核对的具体内容。",
+      platformId: selectedPlatform === ALL_PLATFORMS ? ALL_PLATFORMS : selectedPlatform,
+      phase,
+      due: "待设置",
+      required: false,
+    };
+
+    setTasks((current) => {
+      if (!referenceId) {
+        const next = [...current];
+        const lastPhaseIndex = next.reduce((last, task, index) => (task.phase === phase ? index : last), -1);
+        next.splice(lastPhaseIndex + 1, 0, newTask);
+        return next;
+      }
+
+      const referenceIndex = current.findIndex((task) => task.id === referenceId);
+      if (referenceIndex < 0) return [...current, newTask];
+      const next = [...current];
+      next.splice(referenceIndex + (position === "after" ? 1 : 0), 0, newTask);
+      return next;
+    });
+    setTaskLinks((current) => ({ ...current, [id]: "" }));
+    notify("已添加流程步骤");
+  }
+
+  function removeTask(taskId: string) {
+    setTasks((current) => current.filter((task) => task.id !== taskId));
+    setCompleted((current) => current.filter((id) => id !== taskId));
+    setTaskLinks((current) => Object.fromEntries(Object.entries(current).filter(([id]) => id !== taskId)));
+    notify("已删除流程步骤");
   }
 
   function openModule(moduleId: string) {
@@ -407,46 +574,39 @@ export default function Home() {
     });
   }
 
-  function updateDocBlock(blockId: string, patch: Record<string, string>) {
-    setModules((current) =>
-      current.map((module) => {
-        if (module.id !== editingModuleId) return module;
-        return {
-          ...module,
-          docs: module.docs.map((block) => (block.id === blockId ? ({ ...block, ...patch } as DocumentBlock) : block)),
-        };
-      }),
-    );
+  function replaceMarkdownSelection(before: string, after: string, placeholder: string) {
+    const textarea = markdownTextareaRef.current;
+    const start = textarea?.selectionStart ?? activeModule.markdown.length;
+    const end = textarea?.selectionEnd ?? start;
+    const selected = activeModule.markdown.slice(start, end) || placeholder;
+    const nextMarkdown = `${activeModule.markdown.slice(0, start)}${before}${selected}${after}${activeModule.markdown.slice(end)}`;
+    updateActiveModule({ markdown: nextMarkdown });
+
+    window.requestAnimationFrame(() => {
+      const nextStart = start + before.length;
+      markdownTextareaRef.current?.focus();
+      markdownTextareaRef.current?.setSelectionRange(nextStart, nextStart + selected.length);
+    });
   }
 
-  function addDocBlock(type: DocumentBlock["type"]) {
-    const nextBlock: DocumentBlock =
-      type === "image"
-        ? { id: createId("image"), type, title: "截图或素材示例", imageUrl: "", caption: "" }
-        : type === "link"
-          ? { id: createId("link"), type, title: "相关链接", url: "", body: "" }
-          : { id: createId("text"), type, title: "新段落标题", body: "补充正文内容。" };
+  function insertMarkdownBlock(marker: string, placeholder: string) {
+    const textarea = markdownTextareaRef.current;
+    const start = textarea?.selectionStart ?? activeModule.markdown.length;
+    const end = textarea?.selectionEnd ?? start;
+    const selected = activeModule.markdown.slice(start, end) || placeholder;
+    const leading = start > 0 && !activeModule.markdown.slice(0, start).endsWith("\n\n") ? "\n\n" : "";
+    const trailing = end < activeModule.markdown.length && !activeModule.markdown.slice(end).startsWith("\n\n") ? "\n\n" : "";
+    const insertion = `${leading}${marker}${selected}${trailing}`;
+    updateActiveModule({ markdown: `${activeModule.markdown.slice(0, start)}${insertion}${activeModule.markdown.slice(end)}` });
 
-    updateActiveModule({ docs: [...activeModule.docs, nextBlock] });
-    notify(`已添加${blockLabels[type]}`);
+    window.requestAnimationFrame(() => {
+      const nextStart = start + leading.length + marker.length;
+      markdownTextareaRef.current?.focus();
+      markdownTextareaRef.current?.setSelectionRange(nextStart, nextStart + selected.length);
+    });
   }
 
-  function removeDocBlock(blockId: string) {
-    updateActiveModule({ docs: activeModule.docs.filter((block) => block.id !== blockId) });
-  }
-
-  function moveDocBlock(blockId: string, direction: -1 | 1) {
-    const currentIndex = activeModule.docs.findIndex((block) => block.id === blockId);
-    const nextIndex = currentIndex + direction;
-    if (currentIndex < 0 || nextIndex < 0 || nextIndex >= activeModule.docs.length) return;
-
-    const nextDocs = [...activeModule.docs];
-    const [target] = nextDocs.splice(currentIndex, 1);
-    nextDocs.splice(nextIndex, 0, target);
-    updateActiveModule({ docs: nextDocs });
-  }
-
-  function readImageFile(blockId: string, file?: File) {
+  function insertMarkdownImage(file?: File) {
     if (!file) return;
     if (file.size > 1_200_000) {
       notify("图片较大，建议压缩到 1MB 左右再添加");
@@ -454,7 +614,15 @@ export default function Home() {
     }
 
     const reader = new FileReader();
-    reader.onload = () => updateDocBlock(blockId, { imageUrl: String(reader.result ?? "") });
+    reader.onload = () => {
+      const textarea = markdownTextareaRef.current;
+      const start = textarea?.selectionStart ?? activeModule.markdown.length;
+      const end = textarea?.selectionEnd ?? start;
+      const label = file.name.replace(/\.[^.]+$/, "") || "图片";
+      const insertion = `\n\n![${label}](${String(reader.result ?? "")})\n\n`;
+      updateActiveModule({ markdown: `${activeModule.markdown.slice(0, start)}${insertion}${activeModule.markdown.slice(end)}` });
+      notify("图片已插入文档");
+    };
     reader.readAsDataURL(file);
   }
 
@@ -466,10 +634,7 @@ export default function Home() {
       shortName: "NEW",
       summary: "填写该平台上线前后需要配置和核验的事项。",
       checkpoints: ["配置项一", "配置项二", "上线后核验"],
-      docs: [
-        { id: `${id}-doc-1`, type: "text", title: "配置说明", body: "补充该平台的配置步骤、注意事项和核验标准。" },
-        { id: `${id}-doc-2`, type: "link", title: "后台入口或内部规范", url: "", body: "粘贴平台后台、发布单或内部规范链接。" },
-      ],
+      markdown: "# 配置说明\n\n补充该平台的配置步骤、注意事项和核验标准。\n\n## 后台入口或内部规范\n\n[打开相关页面](https://)",
     };
     setModules((current) => [...current, newModule]);
     setEditingModuleId(id);
@@ -499,6 +664,9 @@ export default function Home() {
   function resetTemplate() {
     if (!window.confirm("恢复模板会覆盖当前勾选、模块编辑和步骤关联，确定继续吗？")) return;
     setCompleted(["version-scope"]);
+    setTasks(defaultTasks);
+    setPhaseTitles(defaultPhaseTitles);
+    setIsFlowEditing(false);
     setModules(defaultModules);
     setTaskLinks(defaultTaskLinks);
     setSelectedPlatform(ALL_PLATFORMS);
@@ -597,7 +765,12 @@ export default function Home() {
           <section className="flow-panel">
             <div className="section-heading">
               <div><span className="eyebrow">GUIDED FLOW</span><h2>发布执行清单</h2></div>
-              <span className="quiet-count">{filteredTasks.length} 项</span>
+              <div className="flow-heading-actions">
+                <span className="quiet-count">{filteredTasks.length} 项</span>
+                <button className={isFlowEditing ? "flow-edit-toggle active" : "flow-edit-toggle"} onClick={() => setIsFlowEditing((current) => !current)}>
+                  {isFlowEditing ? "完成编辑" : "编辑流程"}
+                </button>
+              </div>
             </div>
 
             <div className="phase-list">
@@ -610,7 +783,12 @@ export default function Home() {
                     <div className="phase-rail"><span>{phaseMeta[phase].number}</span><div /></div>
                     <div className="phase-content">
                       <div className="phase-header">
-                        <div><h3>{phaseMeta[phase].label}</h3><p>{phaseDone}/{phaseTasks.length} 项完成</p></div>
+                        <div className="phase-title-wrap">
+                          {isFlowEditing ? (
+                            <input className="phase-title-input" value={phaseTitles[phase]} aria-label={`${phaseMeta[phase].number} 阶段名称`} onChange={(event) => setPhaseTitles((current) => ({ ...current, [phase]: event.target.value }))} />
+                          ) : <h3>{phaseTitles[phase]}</h3>}
+                          <p>{phaseDone}/{phaseTasks.length} 项完成</p>
+                        </div>
                         <span className={phaseDone === phaseTasks.length && phaseTasks.length ? "phase-state complete" : "phase-state"}>
                           {phaseDone === phaseTasks.length && phaseTasks.length ? "已完成" : "进行中"}
                         </span>
@@ -619,6 +797,54 @@ export default function Home() {
                       {phaseTasks.length ? phaseTasks.map((task) => {
                         const isDone = completed.includes(task.id);
                         const linkedModule = getLinkedModule(task.id);
+
+                        if (isFlowEditing) {
+                          return (
+                            <article className="task-row task-row-editing" key={task.id}>
+                              <div className="task-edit-topbar">
+                                <span>流程步骤</span>
+                                <div>
+                                  <button onClick={() => addTaskNear(task.id, phase, "before")}>↑ 上方添加</button>
+                                  <button onClick={() => addTaskNear(task.id, phase, "after")}>↓ 下方添加</button>
+                                  <button className="task-delete" onClick={() => removeTask(task.id)}>删除</button>
+                                </div>
+                              </div>
+                              <div className="task-edit-grid">
+                                <label className="field task-title-field">
+                                  <span>步骤名称</span>
+                                  <input value={task.title} onChange={(event) => updateTask(task.id, { title: event.target.value })} />
+                                </label>
+                                <label className="field task-due-field">
+                                  <span>时间节点</span>
+                                  <input value={task.due} onChange={(event) => updateTask(task.id, { due: event.target.value })} />
+                                </label>
+                              </div>
+                              <label className="field">
+                                <span>执行说明</span>
+                                <textarea rows={3} value={task.detail} onChange={(event) => updateTask(task.id, { detail: event.target.value })} />
+                              </label>
+                              <div className="task-edit-grid settings">
+                                <label className="field">
+                                  <span>适用平台</span>
+                                  <select value={task.platformId} onChange={(event) => updateTask(task.id, { platformId: event.target.value })}>
+                                    {platformOptions.map((platform) => <option value={platform.id} key={platform.id}>{platform.name}</option>)}
+                                  </select>
+                                </label>
+                                <label className="field">
+                                  <span>关联文档</span>
+                                  <select value={taskLinks[task.id] ?? ""} onChange={(event) => setTaskLinks((current) => ({ ...current, [task.id]: event.target.value }))}>
+                                    <option value="">不关联模块</option>
+                                    {modules.map((module) => <option value={module.id} key={module.id}>{module.name}</option>)}
+                                  </select>
+                                </label>
+                                <label className="required-control">
+                                  <input type="checkbox" checked={Boolean(task.required)} onChange={(event) => updateTask(task.id, { required: event.target.checked })} />
+                                  <span>设为必做步骤</span>
+                                </label>
+                              </div>
+                            </article>
+                          );
+                        }
 
                         return (
                           <article className={isDone ? "task-row finished" : "task-row"} key={task.id}>
@@ -655,7 +881,9 @@ export default function Home() {
                             </div>
                           </article>
                         );
-                      }) : <div className="empty-state">该平台在此阶段没有待执行项。</div>}
+                      }) : isFlowEditing ? (
+                        <button className="empty-add-task" onClick={() => addTaskNear(null, phase, "after")}>＋ 添加第一个流程步骤</button>
+                      ) : <div className="empty-state">该平台在此阶段没有待执行项。</div>}
                     </div>
                   </section>
                 );
@@ -671,7 +899,7 @@ export default function Home() {
 
             <div className="module-grid catalog-grid">
               {(selectedPlatform === ALL_PLATFORMS ? modules : modules.filter((module) => module.id === selectedPlatform)).map((module) => {
-                const linkedTasks = defaultTasks.filter((task) => taskLinks[task.id] === module.id || task.platformId === module.id);
+                const linkedTasks = tasks.filter((task) => taskLinks[task.id] === module.id || task.platformId === module.id);
                 const linkedDone = linkedTasks.filter((task) => completed.includes(task.id)).length;
                 const moduleProgress = linkedTasks.length ? Math.round((linkedDone / linkedTasks.length) * 100) : 0;
 
@@ -706,7 +934,7 @@ export default function Home() {
                       ))}
                     </ul>
                     <div className="module-card-footer">
-                      <span>{module.docs.length} 段文档</span>
+                      <span>{getDocumentSectionCount(module.markdown)} 个章节</span>
                       <span>{module.checkpoints.length} 个检查项</span>
                       <span className="document-cue" aria-hidden="true">↗</span>
                     </div>
@@ -725,7 +953,7 @@ export default function Home() {
 
               <div className="module-grid">
                 {modules.map((module) => {
-                  const linkedTasks = defaultTasks.filter((task) => taskLinks[task.id] === module.id || task.platformId === module.id);
+                  const linkedTasks = tasks.filter((task) => taskLinks[task.id] === module.id || task.platformId === module.id);
                   const linkedDone = linkedTasks.filter((task) => completed.includes(task.id)).length;
                   const moduleProgress = linkedTasks.length ? Math.round((linkedDone / linkedTasks.length) * 100) : 0;
 
@@ -741,7 +969,7 @@ export default function Home() {
                       </button>
                       <div className="mini-progress"><div style={{ width: `${moduleProgress}%` }} /></div>
                       <div className="module-card-footer">
-                        <span>{module.docs.length} 段文档</span>
+                        <span>{getDocumentSectionCount(module.markdown)} 个章节</span>
                         <span>{module.checkpoints.length} 个检查项</span>
                       </div>
                     </article>
@@ -780,98 +1008,64 @@ export default function Home() {
                 </label>
               </section>
 
-              <section className="doc-toolbar">
-                <div>
-                  <span className="eyebrow">DOCUMENT BLOCKS</span>
-                  <h3>文档内容</h3>
+              <section className="markdown-editor">
+                <div className="markdown-toolbar">
+                  <div>
+                    <span className="eyebrow">MARKDOWN EDITOR</span>
+                    <h3>文档内容</h3>
+                  </div>
+                  <div className="markdown-tools" role="toolbar" aria-label="Markdown 格式工具">
+                    <button title="一级标题" onClick={() => insertMarkdownBlock("# ", "一级标题")}>H1</button>
+                    <button title="二级标题" onClick={() => insertMarkdownBlock("## ", "二级标题")}>H2</button>
+                    <button className="bold-tool" title="加粗" onClick={() => replaceMarkdownSelection("**", "**", "加粗文字")}>B</button>
+                    <button title="添加链接" onClick={() => replaceMarkdownSelection("[", "](https://)", "链接名称")}>↗</button>
+                    <span className="toolbar-separator" />
+                    {["#c85540", "#00796f", "#315d80", "#b96d19"].map((color) => (
+                      <button
+                        className="color-tool"
+                        style={{ backgroundColor: color }}
+                        title={`字体颜色 ${color}`}
+                        aria-label={`字体颜色 ${color}`}
+                        key={color}
+                        onClick={() => replaceMarkdownSelection(`<span style="color:${color}">`, "</span>", "彩色文字")}
+                      />
+                    ))}
+                    <span className="toolbar-separator" />
+                    <button title="添加图片" onClick={() => markdownImageInputRef.current?.click()}>▧</button>
+                    <input
+                      ref={markdownImageInputRef}
+                      className="visually-hidden"
+                      type="file"
+                      accept="image/*"
+                      onChange={(event) => {
+                        insertMarkdownImage(event.target.files?.[0]);
+                        event.target.value = "";
+                      }}
+                    />
+                  </div>
                 </div>
-                <div className="doc-actions">
-                  <button onClick={() => addDocBlock("text")}><span>＋</span> 标题正文</button>
-                  <button onClick={() => addDocBlock("image")}><span>＋</span> 图片</button>
-                  <button onClick={() => addDocBlock("link")}><span>＋</span> 链接</button>
+
+                <div className="markdown-workspace">
+                  <label className="markdown-pane source-pane">
+                    <span className="pane-label">Markdown</span>
+                    <textarea
+                      ref={markdownTextareaRef}
+                      value={activeModule.markdown}
+                      spellCheck={false}
+                      onChange={(event) => updateActiveModule({ markdown: event.target.value })}
+                    />
+                  </label>
+                  <section className="markdown-pane preview-pane" aria-label="文档实时预览">
+                    <span className="pane-label">实时预览</span>
+                    <div className="markdown-rendered editor-preview">
+                      {activeModule.markdown.trim() ? renderMarkdown(activeModule.markdown) : <p className="markdown-empty">文档内容为空</p>}
+                    </div>
+                  </section>
                 </div>
               </section>
 
-              <div className="doc-block-list">
-                {activeModule.docs.map((block, index) => (
-                  <article className="doc-block" key={block.id}>
-                    <div className="block-bar">
-                      <span>{blockLabels[block.type]}</span>
-                      <div className="block-actions">
-                        <button aria-label="上移" disabled={index === 0} onClick={() => moveDocBlock(block.id, -1)}>↑</button>
-                        <button aria-label="下移" disabled={index === activeModule.docs.length - 1} onClick={() => moveDocBlock(block.id, 1)}>↓</button>
-                        <button aria-label="删除内容块" onClick={() => removeDocBlock(block.id)}>删除</button>
-                      </div>
-                    </div>
-
-                    {block.type === "text" && (
-                      <>
-                        <label className="field compact">
-                          <span>标题</span>
-                          <input value={block.title} onChange={(event) => updateDocBlock(block.id, { title: event.target.value })} />
-                        </label>
-                        <label className="field">
-                          <span>正文</span>
-                          <textarea rows={5} value={block.body} onChange={(event) => updateDocBlock(block.id, { body: event.target.value })} />
-                        </label>
-                      </>
-                    )}
-
-                    {block.type === "image" && (
-                      <>
-                        <label className="field compact">
-                          <span>标题</span>
-                          <input value={block.title} onChange={(event) => updateDocBlock(block.id, { title: event.target.value })} />
-                        </label>
-                        <div className="field-grid">
-                          <label className="field">
-                            <span>图片地址</span>
-                            <input value={block.imageUrl} onChange={(event) => updateDocBlock(block.id, { imageUrl: event.target.value })} />
-                          </label>
-                          <label className="field file-field">
-                            <span>本地图片</span>
-                            <input type="file" accept="image/*" onChange={(event) => readImageFile(block.id, event.target.files?.[0])} />
-                          </label>
-                        </div>
-                        <label className="field">
-                          <span>图片说明</span>
-                          <input value={block.caption} onChange={(event) => updateDocBlock(block.id, { caption: event.target.value })} />
-                        </label>
-                        {block.imageUrl ? (
-                          <img className="image-preview" src={block.imageUrl} alt={block.caption || block.title} />
-                        ) : (
-                          <div className="image-placeholder">图片预览</div>
-                        )}
-                      </>
-                    )}
-
-                    {block.type === "link" && (
-                      <>
-                        <label className="field compact">
-                          <span>链接标题</span>
-                          <input value={block.title} onChange={(event) => updateDocBlock(block.id, { title: event.target.value })} />
-                        </label>
-                        <label className="field">
-                          <span>链接地址</span>
-                          <input value={block.url} onChange={(event) => updateDocBlock(block.id, { url: event.target.value })} />
-                        </label>
-                        <label className="field">
-                          <span>说明</span>
-                          <textarea rows={3} value={block.body} onChange={(event) => updateDocBlock(block.id, { body: event.target.value })} />
-                        </label>
-                        <a className={block.url ? "link-preview" : "link-preview disabled"} href={block.url || "#"} target="_blank" rel="noreferrer" onClick={(event) => !block.url && event.preventDefault()}>
-                          <strong>{block.title || "链接标题"}</strong>
-                          <span>{block.url || "未填写链接"}</span>
-                          {block.body && <p>{block.body}</p>}
-                        </a>
-                      </>
-                    )}
-                  </article>
-                ))}
-              </div>
-
               <div className="editor-note">
-                <strong>{defaultTasks.filter((task) => taskLinks[task.id] === activeModule.id || task.platformId === activeModule.id).length}</strong>
+                <strong>{tasks.filter((task) => taskLinks[task.id] === activeModule.id || task.platformId === activeModule.id).length}</strong>
                 <span>个 SOP 步骤当前关联到此模块</span>
               </div>
             </section>
@@ -894,7 +1088,7 @@ export default function Home() {
                 </div>
                 <p>{readingModule.summary}</p>
                 <div className="document-meta">
-                  <span>{readingModule.docs.length} 个内容章节</span>
+                  <span>{getDocumentSectionCount(readingModule.markdown)} 个内容章节</span>
                   <span>{readingModule.checkpoints.length} 个核对项</span>
                 </div>
               </header>
@@ -911,37 +1105,8 @@ export default function Home() {
                 </section>
               )}
 
-              <div className="document-body">
-                {readingModule.docs.map((block, index) => (
-                  <section className={`document-block ${block.type}`} key={block.id}>
-                    {block.type === "text" && (
-                      <>
-                        <span className="document-section-number">{String(index + 1).padStart(2, "0")}</span>
-                        <h2>{block.title || "未命名段落"}</h2>
-                        <p>{block.body || "暂无正文"}</p>
-                      </>
-                    )}
-                    {block.type === "image" && (
-                      <figure>
-                        <span className="document-section-number">{String(index + 1).padStart(2, "0")}</span>
-                        <h2>{block.title || "图片"}</h2>
-                        {block.imageUrl ? <img src={block.imageUrl} alt={block.caption || block.title} /> : <div className="image-placeholder">暂无图片</div>}
-                        {block.caption && <figcaption>{block.caption}</figcaption>}
-                      </figure>
-                    )}
-                    {block.type === "link" && (
-                      <a className={block.url ? "document-link" : "document-link disabled"} href={block.url || "#"} target="_blank" rel="noreferrer" onClick={(event) => !block.url && event.preventDefault()}>
-                        <span className="document-section-number">{String(index + 1).padStart(2, "0")}</span>
-                        <div>
-                          <h2>{block.title || "相关链接"}</h2>
-                          {block.body && <p>{block.body}</p>}
-                          <small>{block.url || "链接暂未填写"}</small>
-                        </div>
-                        <strong aria-hidden="true">↗</strong>
-                      </a>
-                    )}
-                  </section>
-                ))}
+              <div className="document-body markdown-rendered">
+                {readingModule.markdown.trim() ? renderMarkdown(readingModule.markdown) : <p className="markdown-empty">文档内容为空</p>}
               </div>
             </article>
           </section>
