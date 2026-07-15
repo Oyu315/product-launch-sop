@@ -1073,7 +1073,7 @@ export default function Home() {
                     <button className="bold-tool" title="加粗" onClick={() => replaceMarkdownSelection("**", "**", "加粗文字")}>B</button>
                     <button title="添加链接" onClick={() => replaceMarkdownSelection("[", "](https://)", "链接名称")}>↗</button>
                     <span className="toolbar-separator" />
-                    {["#c85540", "#00796f", "#315d80", "#b96d19"].map((color) => (
+                    {["#ce5e55", "#416fae", "#7967a6", "#a87618"].map((color) => (
                       <button
                         className="color-tool"
                         style={{ backgroundColor: color }}
