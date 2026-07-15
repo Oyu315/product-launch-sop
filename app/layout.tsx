@@ -9,13 +9,13 @@ export async function generateMetadata(): Promise<Metadata> {
   const imageUrl = `${protocol}://${host}/og.png`;
 
   return {
-    title: "上线指挥台 | 产品发布 SOP",
-    description: "为新运营同学设计的多平台产品上架执行工作台。",
+    title: "上架 SOP 工具 | 产品发布检查清单",
+    description: "用于产品上架前后执行、提醒和平台配置维护的 SOP 工具。",
     icons: { icon: "/favicon.svg", shortcut: "/favicon.svg" },
     openGraph: {
-      title: "上线指挥台 | 产品发布 SOP",
-      description: "多平台产品上架的执行、提醒与复核工作台。",
-      images: [{ url: imageUrl, width: 1720, height: 940, alt: "上线指挥台" }],
+      title: "上架 SOP 工具 | 产品发布检查清单",
+      description: "主 SOP 流程与平台配置模块合并管理，支持勾选提醒、模块编辑和步骤跳转。",
+      images: [{ url: imageUrl, width: 1720, height: 940, alt: "上架 SOP 工具" }],
     },
     twitter: { card: "summary_large_image", images: [imageUrl] },
   };
