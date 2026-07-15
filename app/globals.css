@@ -152,6 +152,7 @@ nav { display: grid; gap: 6px; }
 
 .access-button:hover { background: #f4f6f8; }
 .access-button.connected { color: #355f99; }
+.access-button.snapshot-label { cursor: default; }
 
 .access-dot {
   width: 7px;
@@ -164,6 +165,8 @@ nav { display: grid; gap: 6px; }
   background: #5f82b6;
   box-shadow: 0 0 0 3px #e7edf6;
 }
+
+.snapshot-label .access-dot { background: #6f8fbe; }
 
 .sync-label {
   padding: 0 4px;

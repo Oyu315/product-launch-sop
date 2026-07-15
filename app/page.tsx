@@ -49,7 +49,6 @@ type SharedResponse = {
 
 const STORAGE_KEY = "product-launch-sop-tool-v2";
 const EDITOR_KEY_STORAGE = "product-launch-sop-editor-key";
-const SHARED_API_ORIGIN = "https://product-launch-sop-hub.real-1-4436.chatgpt.site";
 const ALL_PLATFORMS = "all";
 
 const phaseMeta: Record<Phase, { label: string; number: string }> = {
@@ -304,7 +303,10 @@ function safeLink(url: string) {
 }
 
 function getSharedApiUrl(path: string) {
-  return window.location.hostname.endsWith("github.io") ? `${SHARED_API_ORIGIN}${path}` : path;
+  if (window.location.hostname.endsWith("github.io") && path === "/api/state") {
+    return "/product-launch-sop/shared-state.json";
+  }
+  return path;
 }
 
 function optimizeImage(file: File) {
@@ -582,6 +584,7 @@ export default function Home() {
   const requiredLeft = tasks.filter((task) => task.required && !completed.includes(task.id)).length;
   const activeModule = modules.find((module) => module.id === editingModuleId) ?? modules[0] ?? defaultModules[0];
   const readingModule = modules.find((module) => module.id === readingModuleId) ?? modules[0] ?? defaultModules[0];
+  const isPublicSnapshot = typeof window !== "undefined" && window.location.hostname.endsWith("github.io");
 
   function applySharedState(data: Partial<SharedState>) {
     if (Array.isArray(data.completed)) setCompleted(data.completed);
@@ -892,12 +895,13 @@ export default function Home() {
         </nav>
 
         <div className="sidebar-access">
-          <button className={canEdit ? "access-button connected" : "access-button"} onClick={toggleEditorAccess}>
-            <span className="access-dot" />
-            {canEdit ? "编辑模式" : "输入编辑密钥"}
-          </button>
+          {!isPublicSnapshot && <button className={canEdit ? "access-button connected" : "access-button"} onClick={toggleEditorAccess}>
+              <span className="access-dot" />
+              {canEdit ? "编辑模式" : "输入编辑密钥"}
+          </button>}
+          {isPublicSnapshot && <div className="access-button snapshot-label"><span className="access-dot" />公开只读</div>}
           <span className="sync-label">
-            {syncStatus === "loading" ? "正在连接共享数据" : syncStatus === "saving" ? "正在保存" : syncStatus === "saved" ? "共享数据已同步" : syncStatus === "offline" ? "云端暂时离线" : "访客只读"}
+            {isPublicSnapshot ? "内容由编辑端定时发布" : syncStatus === "loading" ? "正在连接共享数据" : syncStatus === "saving" ? "正在保存" : syncStatus === "saved" ? "共享数据已同步" : syncStatus === "offline" ? "云端暂时离线" : "访客只读"}
           </span>
           {canEdit && <button className="reset-button" onClick={resetTemplate}>恢复模板</button>}
         </div>
