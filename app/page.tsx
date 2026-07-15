@@ -1,6 +1,6 @@
 "use client";
 
-import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { type ClipboardEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
 type Phase = "before" | "submission" | "after";
 type View = "sop" | "platforms" | "editor" | "document";
@@ -286,6 +286,39 @@ function safeLink(url: string) {
   return /^(https?:\/\/|mailto:|\/|#)/i.test(url) ? url : "#";
 }
 
+function optimizeImage(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error("图片读取失败"));
+    reader.onload = () => {
+      const image = new Image();
+      image.onerror = () => reject(new Error("图片解析失败"));
+      image.onload = () => {
+        const maxWidth = 1800;
+        const maxHeight = 1400;
+        const scale = Math.min(1, maxWidth / image.width, maxHeight / image.height);
+        const width = Math.max(1, Math.round(image.width * scale));
+        const height = Math.max(1, Math.round(image.height * scale));
+        const canvas = document.createElement("canvas");
+        const context = canvas.getContext("2d");
+        if (!context) {
+          reject(new Error("图片处理失败"));
+          return;
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        context.drawImage(image, 0, 0, width, height);
+        let dataUrl = canvas.toDataURL("image/webp", 0.9);
+        if (dataUrl.length > 2_400_000) dataUrl = canvas.toDataURL("image/webp", 0.76);
+        resolve(dataUrl);
+      };
+      image.src = String(reader.result ?? "");
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 function renderInline(text: string, keyPrefix: string): ReactNode[] {
   const pattern = /(\*\*[^*]+\*\*|\[[^\]]+\]\([^)]+\)|<span style="color:#[0-9a-fA-F]{6}">[^<]*<\/span>)/g;
   const nodes: ReactNode[] = [];
@@ -458,10 +491,14 @@ export default function Home() {
 
   useEffect(() => {
     if (!loaded) return;
-    window.localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({ completed, tasks, phaseTitles, modules, taskLinks }),
-    );
+    try {
+      window.localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ completed, tasks, phaseTitles, modules, taskLinks }),
+      );
+    } catch {
+      setToast("浏览器存储空间不足，请删除部分较大的图片");
+    }
   }, [completed, loaded, modules, phaseTitles, taskLinks, tasks]);
 
   const platformOptions = useMemo(
@@ -606,24 +643,40 @@ export default function Home() {
     });
   }
 
-  function insertMarkdownImage(file?: File) {
+  async function insertMarkdownImage(file?: File) {
     if (!file) return;
-    if (file.size > 1_200_000) {
-      notify("图片较大，建议压缩到 1MB 左右再添加");
+    if (file.size > 10_000_000) {
+      notify("图片超过 10MB，请先压缩后再添加");
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = () => {
-      const textarea = markdownTextareaRef.current;
-      const start = textarea?.selectionStart ?? activeModule.markdown.length;
-      const end = textarea?.selectionEnd ?? start;
-      const label = file.name.replace(/\.[^.]+$/, "") || "图片";
-      const insertion = `\n\n![${label}](${String(reader.result ?? "")})\n\n`;
-      updateActiveModule({ markdown: `${activeModule.markdown.slice(0, start)}${insertion}${activeModule.markdown.slice(end)}` });
+    const textarea = markdownTextareaRef.current;
+    const start = textarea?.selectionStart ?? activeModule.markdown.length;
+    const end = textarea?.selectionEnd ?? start;
+    const moduleId = activeModule.id;
+
+    try {
+      const dataUrl = await optimizeImage(file);
+      const label = file.name.replace(/\.[^.]+$/, "") || "截图";
+      const insertion = `\n\n![${label}](${dataUrl})\n\n`;
+      setModules((current) => current.map((module) => {
+        if (module.id !== moduleId) return module;
+        const safeStart = Math.min(start, module.markdown.length);
+        const safeEnd = Math.min(Math.max(end, safeStart), module.markdown.length);
+        return { ...module, markdown: `${module.markdown.slice(0, safeStart)}${insertion}${module.markdown.slice(safeEnd)}` };
+      }));
       notify("图片已插入文档");
-    };
-    reader.readAsDataURL(file);
+    } catch {
+      notify("图片处理失败，请换一张图片重试");
+    }
+  }
+
+  function handleMarkdownPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const imageItem = Array.from(event.clipboardData.items).find((item) => item.type.startsWith("image/"));
+    const imageFile = imageItem?.getAsFile();
+    if (!imageFile) return;
+    event.preventDefault();
+    void insertMarkdownImage(imageFile);
   }
 
   function addModule() {
@@ -821,7 +874,7 @@ export default function Home() {
                               </div>
                               <label className="field">
                                 <span>执行说明</span>
-                                <textarea rows={3} value={task.detail} onChange={(event) => updateTask(task.id, { detail: event.target.value })} />
+                                <textarea rows={2} value={task.detail} onChange={(event) => updateTask(task.id, { detail: event.target.value })} />
                               </label>
                               <div className="task-edit-grid settings">
                                 <label className="field">
@@ -1052,6 +1105,7 @@ export default function Home() {
                       ref={markdownTextareaRef}
                       value={activeModule.markdown}
                       spellCheck={false}
+                      onPaste={handleMarkdownPaste}
                       onChange={(event) => updateActiveModule({ markdown: event.target.value })}
                     />
                   </label>
