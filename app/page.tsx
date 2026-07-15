@@ -4,6 +4,11 @@ import { useEffect, useMemo, useState } from "react";
 
 type Phase = "before" | "submission" | "after";
 
+type DocumentBlock =
+  | { id: string; type: "text"; title: string; body: string }
+  | { id: string; type: "image"; title: string; imageUrl: string; caption: string }
+  | { id: string; type: "link"; title: string; url: string; body: string };
+
 type SopTask = {
   id: string;
   title: string;
@@ -21,10 +26,19 @@ type PlatformModule = {
   shortName: string;
   summary: string;
   checkpoints: string[];
+  docs: DocumentBlock[];
 };
+
+type SavedModule = Partial<PlatformModule> & { id?: string };
 
 const STORAGE_KEY = "product-launch-sop-tool-v2";
 const ALL_PLATFORMS = "all";
+
+const blockLabels: Record<DocumentBlock["type"], string> = {
+  text: "标题正文",
+  image: "图片",
+  link: "链接",
+};
 
 const phaseMeta: Record<Phase, { label: string; number: string }> = {
   before: { label: "上线前准备", number: "01" },
@@ -39,6 +53,27 @@ const defaultModules: PlatformModule[] = [
     shortName: "AS",
     summary: "应用信息、本地化、隐私表单、审核备注与版本构建。",
     checkpoints: ["App 信息与本地化", "App 隐私与数据收集", "版本构建与出口合规", "审核备注与测试账号"],
+    docs: [
+      {
+        id: "as-doc-1",
+        type: "text",
+        title: "基础信息配置",
+        body: "核对 App 名称、副标题、分类、年龄分级、关键词、本地化语言和商店截图。所有文案需与本次版本功能一致。",
+      },
+      {
+        id: "as-doc-2",
+        type: "text",
+        title: "审核备注",
+        body: "补充测试账号、特殊入口路径、付费说明、隐私权限说明和需要审核员重点关注的功能变化。",
+      },
+      {
+        id: "as-doc-3",
+        type: "link",
+        title: "后台入口或内部规范",
+        url: "",
+        body: "粘贴 App Store Connect、发布单或内部审核规范链接。",
+      },
+    ],
   },
   {
     id: "google-play",
@@ -46,6 +81,27 @@ const defaultModules: PlatformModule[] = [
     shortName: "GP",
     summary: "商店资料、Data safety、AAB、测试轨道、内容分级与生产发布。",
     checkpoints: ["商店设置与 Data safety", "AAB 与内部测试", "内容分级与目标受众", "生产轨道与发布节奏"],
+    docs: [
+      {
+        id: "gp-doc-1",
+        type: "text",
+        title: "Data safety 核对",
+        body: "确认收集数据类型、共享对象、加密传输、删除请求路径和 SDK 数据行为，需与隐私政策保持一致。",
+      },
+      {
+        id: "gp-doc-2",
+        type: "text",
+        title: "发布轨道",
+        body: "先上传 AAB 至内部测试轨道完成安装和冒烟验证，再按发布节奏切换到生产轨道。",
+      },
+      {
+        id: "gp-doc-3",
+        type: "link",
+        title: "后台入口或内部规范",
+        url: "",
+        body: "粘贴 Google Play Console、发布单或内部审核规范链接。",
+      },
+    ],
   },
   {
     id: "huawei",
@@ -53,6 +109,27 @@ const defaultModules: PlatformModule[] = [
     shortName: "HW",
     summary: "应用资质、AGC 服务、地区语言、定价与审核资料。",
     checkpoints: ["应用信息与资质", "AGC 服务配置", "地区与语言", "审核资料与提审"],
+    docs: [
+      {
+        id: "hw-doc-1",
+        type: "text",
+        title: "应用资质",
+        body: "确认开发者资质、应用分类、权限说明、隐私政策、软件著作权或平台要求的补充材料。",
+      },
+      {
+        id: "hw-doc-2",
+        type: "text",
+        title: "AGC 与地区语言",
+        body: "检查 AGC 服务配置、国家地区、语言素材、定价和可见范围，避免提审后再返工。",
+      },
+      {
+        id: "hw-doc-3",
+        type: "link",
+        title: "后台入口或内部规范",
+        url: "",
+        body: "粘贴 AppGallery Connect、发布单或内部审核规范链接。",
+      },
+    ],
   },
   {
     id: "xiaomi",
@@ -60,6 +137,27 @@ const defaultModules: PlatformModule[] = [
     shortName: "MI",
     summary: "开发者资质、应用资料、测试包、兼容性与发布备注。",
     checkpoints: ["开发者资质", "应用信息与素材", "测试包与兼容性", "审核备注与发布"],
+    docs: [
+      {
+        id: "mi-doc-1",
+        type: "text",
+        title: "应用资料",
+        body: "核对应用名称、图标、截图、简介、详细描述、隐私政策、权限说明和适配信息。",
+      },
+      {
+        id: "mi-doc-2",
+        type: "text",
+        title: "测试包与兼容性",
+        body: "上传前完成安装、启动、登录、核心功能、广告展示和异常退出验证，保留必要截图。",
+      },
+      {
+        id: "mi-doc-3",
+        type: "link",
+        title: "后台入口或内部规范",
+        url: "",
+        body: "粘贴小米开放平台、发布单或内部审核规范链接。",
+      },
+    ],
   },
 ];
 
@@ -155,6 +253,46 @@ const defaultTaskLinks = Object.fromEntries(
   defaultTasks.map((task) => [task.id, task.moduleId ?? ""]),
 ) as Record<string, string>;
 
+function createId(prefix: string) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+function docsFromLegacyModule(module: SavedModule, index: number): DocumentBlock[] {
+  const moduleId = module.id ?? `module-${index}`;
+  const checkpointText = Array.isArray(module.checkpoints) ? module.checkpoints.join("\n") : "";
+
+  return [
+    {
+      id: `${moduleId}-legacy-summary`,
+      type: "text",
+      title: `${module.name ?? "平台"} 配置说明`,
+      body: module.summary || "补充该平台上线前后需要说明的配置规则。",
+    },
+    {
+      id: `${moduleId}-legacy-checkpoints`,
+      type: "text",
+      title: "核对清单",
+      body: checkpointText || "补充需要逐项核对的配置内容。",
+    },
+  ];
+}
+
+function normalizeModules(rawModules: SavedModule[]): PlatformModule[] {
+  return rawModules.map((module, index) => {
+    const fallback = defaultModules[index] ?? defaultModules[0];
+    const docs = Array.isArray(module.docs) && module.docs.length ? module.docs : docsFromLegacyModule(module, index);
+
+    return {
+      id: module.id || `module-${index}`,
+      name: module.name || fallback.name,
+      shortName: module.shortName || fallback.shortName,
+      summary: module.summary || fallback.summary,
+      checkpoints: Array.isArray(module.checkpoints) ? module.checkpoints : fallback.checkpoints,
+      docs,
+    };
+  });
+}
+
 export default function Home() {
   const [activeView, setActiveView] = useState<"sop" | "platforms">("sop");
   const [selectedPlatform, setSelectedPlatform] = useState(ALL_PLATFORMS);
@@ -172,13 +310,14 @@ export default function Home() {
       try {
         const data = JSON.parse(saved) as {
           completed?: string[];
-          modules?: PlatformModule[];
+          modules?: SavedModule[];
           taskLinks?: Record<string, string>;
         };
         if (Array.isArray(data.completed)) setCompleted(data.completed);
         if (Array.isArray(data.modules) && data.modules.length) {
-          setModules(data.modules);
-          setEditingModuleId(data.modules[0].id);
+          const normalizedModules = normalizeModules(data.modules);
+          setModules(normalizedModules);
+          setEditingModuleId(normalizedModules[0].id);
         }
         if (data.taskLinks) setTaskLinks({ ...defaultTaskLinks, ...data.taskLinks });
       } catch {
@@ -248,7 +387,7 @@ export default function Home() {
 
   function updateActiveModule(patch: Partial<PlatformModule>) {
     setModules((current) =>
-      current.map((module) => (module.id === activeModule.id ? { ...module, ...patch } : module)),
+      current.map((module) => (module.id === editingModuleId ? { ...module, ...patch } : module)),
     );
   }
 
@@ -261,6 +400,57 @@ export default function Home() {
     });
   }
 
+  function updateDocBlock(blockId: string, patch: Record<string, string>) {
+    setModules((current) =>
+      current.map((module) => {
+        if (module.id !== editingModuleId) return module;
+        return {
+          ...module,
+          docs: module.docs.map((block) => (block.id === blockId ? ({ ...block, ...patch } as DocumentBlock) : block)),
+        };
+      }),
+    );
+  }
+
+  function addDocBlock(type: DocumentBlock["type"]) {
+    const nextBlock: DocumentBlock =
+      type === "image"
+        ? { id: createId("image"), type, title: "截图或素材示例", imageUrl: "", caption: "" }
+        : type === "link"
+          ? { id: createId("link"), type, title: "相关链接", url: "", body: "" }
+          : { id: createId("text"), type, title: "新段落标题", body: "补充正文内容。" };
+
+    updateActiveModule({ docs: [...activeModule.docs, nextBlock] });
+    notify(`已添加${blockLabels[type]}`);
+  }
+
+  function removeDocBlock(blockId: string) {
+    updateActiveModule({ docs: activeModule.docs.filter((block) => block.id !== blockId) });
+  }
+
+  function moveDocBlock(blockId: string, direction: -1 | 1) {
+    const currentIndex = activeModule.docs.findIndex((block) => block.id === blockId);
+    const nextIndex = currentIndex + direction;
+    if (currentIndex < 0 || nextIndex < 0 || nextIndex >= activeModule.docs.length) return;
+
+    const nextDocs = [...activeModule.docs];
+    const [target] = nextDocs.splice(currentIndex, 1);
+    nextDocs.splice(nextIndex, 0, target);
+    updateActiveModule({ docs: nextDocs });
+  }
+
+  function readImageFile(blockId: string, file?: File) {
+    if (!file) return;
+    if (file.size > 1_200_000) {
+      notify("图片较大，建议压缩到 1MB 左右再添加");
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => updateDocBlock(blockId, { imageUrl: String(reader.result ?? "") });
+    reader.readAsDataURL(file);
+  }
+
   function addModule() {
     const id = `custom-${Date.now()}`;
     const newModule: PlatformModule = {
@@ -269,6 +459,10 @@ export default function Home() {
       shortName: "NEW",
       summary: "填写该平台上线前后需要配置和核验的事项。",
       checkpoints: ["配置项一", "配置项二", "上线后核验"],
+      docs: [
+        { id: `${id}-doc-1`, type: "text", title: "配置说明", body: "补充该平台的配置步骤、注意事项和核验标准。" },
+        { id: `${id}-doc-2`, type: "link", title: "后台入口或内部规范", url: "", body: "粘贴平台后台、发布单或内部规范链接。" },
+      ],
     };
     setModules((current) => [...current, newModule]);
     setEditingModuleId(id);
@@ -335,7 +529,7 @@ export default function Home() {
             <p>
               {activeView === "sop"
                 ? "按流程勾选，必要步骤可关联到对应平台模块，点击后直接跳转配置。"
-                : "维护各平台上线前后配置项，修改后会保存在当前浏览器。"}
+                : "维护各平台上线前后配置文档，文字、图片和链接都会保存在当前浏览器。"}
             </p>
           </div>
           <div className="header-stat">
@@ -466,43 +660,169 @@ export default function Home() {
                         <span className="module-percent">{moduleProgress}%</span>
                       </button>
                       <div className="mini-progress"><div style={{ width: `${moduleProgress}%` }} /></div>
-                      <ul>
-                        {module.checkpoints.slice(0, 4).map((item) => <li key={item}><span className="list-check" />{item}</li>)}
-                      </ul>
+                      <div className="module-card-footer">
+                        <span>{module.docs.length} 段文档</span>
+                        <span>{module.checkpoints.length} 个检查项</span>
+                      </div>
                     </article>
                   );
                 })}
               </div>
             </div>
 
-            <aside className="editor-panel">
+            <section className="editor-panel">
               <div className="section-heading editor-heading">
-                <div><span className="eyebrow">EDITOR</span><h2>模块编辑器</h2></div>
-                <button className="danger-button" onClick={() => removeModule(activeModule.id)}>删除</button>
+                <div><span className="eyebrow">DOCUMENT EDITOR</span><h2>{activeModule.name} 文档</h2></div>
+                <button className="danger-button" onClick={() => removeModule(activeModule.id)}>删除模块</button>
               </div>
 
-              <label className="field">
-                <span>模块名称</span>
-                <input value={activeModule.name} onChange={(event) => updateActiveModule({ name: event.target.value })} />
-              </label>
-              <label className="field">
-                <span>短标识</span>
-                <input value={activeModule.shortName} onChange={(event) => updateActiveModule({ shortName: event.target.value.toUpperCase().slice(0, 4) })} />
-              </label>
-              <label className="field">
-                <span>模块说明</span>
-                <textarea rows={3} value={activeModule.summary} onChange={(event) => updateActiveModule({ summary: event.target.value })} />
-              </label>
-              <label className="field">
-                <span>配置项清单</span>
-                <textarea rows={8} value={activeModule.checkpoints.join("\n")} onChange={(event) => updateCheckpoints(event.target.value)} />
-              </label>
+              <section className="editor-card">
+                <div className="field-grid">
+                  <label className="field">
+                    <span>模块名称</span>
+                    <input value={activeModule.name} onChange={(event) => updateActiveModule({ name: event.target.value })} />
+                  </label>
+                  <label className="field">
+                    <span>短标识</span>
+                    <input value={activeModule.shortName} onChange={(event) => updateActiveModule({ shortName: event.target.value.toUpperCase().slice(0, 4) })} />
+                  </label>
+                </div>
+                <label className="field">
+                  <span>模块摘要</span>
+                  <textarea rows={2} value={activeModule.summary} onChange={(event) => updateActiveModule({ summary: event.target.value })} />
+                </label>
+                <label className="field">
+                  <span>检查项</span>
+                  <textarea rows={4} value={activeModule.checkpoints.join("\n")} onChange={(event) => updateCheckpoints(event.target.value)} />
+                </label>
+              </section>
+
+              <section className="doc-toolbar">
+                <div>
+                  <span className="eyebrow">DOCUMENT BLOCKS</span>
+                  <h3>文档内容</h3>
+                </div>
+                <div className="doc-actions">
+                  <button onClick={() => addDocBlock("text")}><span>＋</span> 标题正文</button>
+                  <button onClick={() => addDocBlock("image")}><span>＋</span> 图片</button>
+                  <button onClick={() => addDocBlock("link")}><span>＋</span> 链接</button>
+                </div>
+              </section>
+
+              <div className="doc-block-list">
+                {activeModule.docs.map((block, index) => (
+                  <article className="doc-block" key={block.id}>
+                    <div className="block-bar">
+                      <span>{blockLabels[block.type]}</span>
+                      <div className="block-actions">
+                        <button aria-label="上移" disabled={index === 0} onClick={() => moveDocBlock(block.id, -1)}>↑</button>
+                        <button aria-label="下移" disabled={index === activeModule.docs.length - 1} onClick={() => moveDocBlock(block.id, 1)}>↓</button>
+                        <button aria-label="删除内容块" onClick={() => removeDocBlock(block.id)}>删除</button>
+                      </div>
+                    </div>
+
+                    {block.type === "text" && (
+                      <>
+                        <label className="field compact">
+                          <span>标题</span>
+                          <input value={block.title} onChange={(event) => updateDocBlock(block.id, { title: event.target.value })} />
+                        </label>
+                        <label className="field">
+                          <span>正文</span>
+                          <textarea rows={5} value={block.body} onChange={(event) => updateDocBlock(block.id, { body: event.target.value })} />
+                        </label>
+                      </>
+                    )}
+
+                    {block.type === "image" && (
+                      <>
+                        <label className="field compact">
+                          <span>标题</span>
+                          <input value={block.title} onChange={(event) => updateDocBlock(block.id, { title: event.target.value })} />
+                        </label>
+                        <div className="field-grid">
+                          <label className="field">
+                            <span>图片地址</span>
+                            <input value={block.imageUrl} onChange={(event) => updateDocBlock(block.id, { imageUrl: event.target.value })} />
+                          </label>
+                          <label className="field file-field">
+                            <span>本地图片</span>
+                            <input type="file" accept="image/*" onChange={(event) => readImageFile(block.id, event.target.files?.[0])} />
+                          </label>
+                        </div>
+                        <label className="field">
+                          <span>图片说明</span>
+                          <input value={block.caption} onChange={(event) => updateDocBlock(block.id, { caption: event.target.value })} />
+                        </label>
+                        {block.imageUrl ? (
+                          <img className="image-preview" src={block.imageUrl} alt={block.caption || block.title} />
+                        ) : (
+                          <div className="image-placeholder">图片预览</div>
+                        )}
+                      </>
+                    )}
+
+                    {block.type === "link" && (
+                      <>
+                        <label className="field compact">
+                          <span>链接标题</span>
+                          <input value={block.title} onChange={(event) => updateDocBlock(block.id, { title: event.target.value })} />
+                        </label>
+                        <label className="field">
+                          <span>链接地址</span>
+                          <input value={block.url} onChange={(event) => updateDocBlock(block.id, { url: event.target.value })} />
+                        </label>
+                        <label className="field">
+                          <span>说明</span>
+                          <textarea rows={3} value={block.body} onChange={(event) => updateDocBlock(block.id, { body: event.target.value })} />
+                        </label>
+                        <a className={block.url ? "link-preview" : "link-preview disabled"} href={block.url || "#"} target="_blank" rel="noreferrer" onClick={(event) => !block.url && event.preventDefault()}>
+                          <strong>{block.title || "链接标题"}</strong>
+                          <span>{block.url || "未填写链接"}</span>
+                          {block.body && <p>{block.body}</p>}
+                        </a>
+                      </>
+                    )}
+                  </article>
+                ))}
+              </div>
+
+              <section className="document-preview">
+                <div className="preview-heading">
+                  <span className="eyebrow">PREVIEW</span>
+                  <h3>{activeModule.name} 配置说明</h3>
+                </div>
+                {activeModule.docs.map((block) => (
+                  <article className={`preview-block ${block.type}`} key={`${block.id}-preview`}>
+                    {block.type === "text" && (
+                      <>
+                        <h4>{block.title || "未命名段落"}</h4>
+                        <p>{block.body || "暂无正文"}</p>
+                      </>
+                    )}
+                    {block.type === "image" && (
+                      <>
+                        <h4>{block.title || "图片"}</h4>
+                        {block.imageUrl ? <img src={block.imageUrl} alt={block.caption || block.title} /> : <div className="image-placeholder">图片预览</div>}
+                        {block.caption && <p>{block.caption}</p>}
+                      </>
+                    )}
+                    {block.type === "link" && (
+                      <a href={block.url || "#"} target="_blank" rel="noreferrer" onClick={(event) => !block.url && event.preventDefault()}>
+                        <strong>{block.title || "链接标题"}</strong>
+                        <span>{block.url || "未填写链接"}</span>
+                        {block.body && <p>{block.body}</p>}
+                      </a>
+                    )}
+                  </article>
+                ))}
+              </section>
 
               <div className="editor-note">
                 <strong>{defaultTasks.filter((task) => taskLinks[task.id] === activeModule.id || task.platformId === activeModule.id).length}</strong>
                 <span>个 SOP 步骤当前关联到此模块</span>
               </div>
-            </aside>
+            </section>
           </section>
         )}
       </section>
