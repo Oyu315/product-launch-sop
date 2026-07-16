@@ -48,6 +48,7 @@ type SharedResponse = {
 };
 
 const STORAGE_KEY = "product-launch-sop-tool-v2";
+const PUBLIC_PROGRESS_STORAGE = "product-launch-sop-public-progress-v1";
 const EDITOR_KEY_STORAGE = "product-launch-sop-editor-key";
 const ALL_PLATFORMS = "all";
 
@@ -485,17 +486,32 @@ export default function SopToolWorkspace() {
   const [syncStatus, setSyncStatus] = useState<"loading" | "readonly" | "saving" | "saved" | "offline">("loading");
   const markdownTextareaRef = useRef<HTMLTextAreaElement>(null);
   const markdownImageInputRef = useRef<HTMLInputElement>(null);
+  const isPublicSnapshot = typeof window !== "undefined" && window.location.hostname.endsWith("github.io");
 
   useEffect(() => {
     let cancelled = false;
+    const publicSnapshot = window.location.hostname.endsWith("github.io");
     const savedKey = window.localStorage.getItem(EDITOR_KEY_STORAGE) ?? "";
-    const saved = window.localStorage.getItem(STORAGE_KEY);
+    const saved = publicSnapshot ? null : window.localStorage.getItem(STORAGE_KEY);
+    const savedPublicProgress = publicSnapshot ? window.localStorage.getItem(PUBLIC_PROGRESS_STORAGE) : null;
+    let publicProgress: string[] | null = null;
 
     if (saved) {
       try {
         applySharedState(JSON.parse(saved) as Partial<SharedState>);
       } catch {
         window.localStorage.removeItem(STORAGE_KEY);
+      }
+    }
+
+    if (savedPublicProgress) {
+      try {
+        const parsed = JSON.parse(savedPublicProgress) as unknown;
+        if (Array.isArray(parsed) && parsed.every((item) => typeof item === "string")) {
+          publicProgress = parsed;
+        }
+      } catch {
+        window.localStorage.removeItem(PUBLIC_PROGRESS_STORAGE);
       }
     }
 
@@ -510,6 +526,7 @@ export default function SopToolWorkspace() {
         if (cancelled) return;
 
         if (data.state) applySharedState(data.state);
+        if (publicSnapshot && publicProgress) setCompleted(publicProgress);
         setCanEdit(data.canEdit);
         setSyncStatus(data.canEdit ? "saved" : "readonly");
         if (data.canEdit) setEditorKey(savedKey);
@@ -533,6 +550,12 @@ export default function SopToolWorkspace() {
   useEffect(() => {
     if (!loaded) return;
     const state = { completed, tasks, phaseTitles, modules, taskLinks };
+
+    if (isPublicSnapshot) {
+      window.localStorage.setItem(PUBLIC_PROGRESS_STORAGE, JSON.stringify(completed));
+      return;
+    }
+
     try {
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
     } catch {
@@ -560,7 +583,7 @@ export default function SopToolWorkspace() {
     }, 800);
 
     return () => window.clearTimeout(timer);
-  }, [canEdit, completed, editorKey, loaded, modules, phaseTitles, taskLinks, tasks]);
+  }, [canEdit, completed, editorKey, isPublicSnapshot, loaded, modules, phaseTitles, taskLinks, tasks]);
 
   const platformOptions = useMemo(
     () => [{ id: ALL_PLATFORMS, name: "全部平台" }, ...modules.map(({ id, name }) => ({ id, name }))],
@@ -584,8 +607,6 @@ export default function SopToolWorkspace() {
   const requiredLeft = tasks.filter((task) => task.required && !completed.includes(task.id)).length;
   const activeModule = modules.find((module) => module.id === editingModuleId) ?? modules[0] ?? defaultModules[0];
   const readingModule = modules.find((module) => module.id === readingModuleId) ?? modules[0] ?? defaultModules[0];
-  const isPublicSnapshot = typeof window !== "undefined" && window.location.hostname.endsWith("github.io");
-
   function applySharedState(data: Partial<SharedState>) {
     if (Array.isArray(data.completed)) setCompleted(data.completed);
     if (Array.isArray(data.tasks) && data.tasks.length) setTasks(data.tasks);
@@ -899,9 +920,9 @@ export default function SopToolWorkspace() {
               <span className="access-dot" />
               {canEdit ? "编辑模式" : "输入编辑密钥"}
           </button>}
-          {isPublicSnapshot && <div className="access-button snapshot-label"><span className="access-dot" />公开只读</div>}
+          {isPublicSnapshot && <div className="access-button snapshot-label"><span className="access-dot" />公开清单</div>}
           <span className="sync-label">
-            {isPublicSnapshot ? "内容由编辑端定时发布" : syncStatus === "loading" ? "正在连接共享数据" : syncStatus === "saving" ? "正在保存" : syncStatus === "saved" ? "共享数据已同步" : syncStatus === "offline" ? "云端暂时离线" : "访客只读"}
+            {isPublicSnapshot ? "内容只读 · 勾选保存在本机" : syncStatus === "loading" ? "正在连接共享数据" : syncStatus === "saving" ? "正在保存" : syncStatus === "saved" ? "共享数据已同步" : syncStatus === "offline" ? "云端暂时离线" : "访客只读"}
           </span>
           {canEdit && <button className="reset-button" onClick={resetTemplate}>恢复模板</button>}
         </div>
@@ -1037,7 +1058,7 @@ export default function SopToolWorkspace() {
 
                         return (
                           <article className={isDone ? "task-row finished" : "task-row"} key={task.id}>
-                            <button className={isDone ? "check checked" : "check"} aria-label={`完成 ${task.title}`} disabled={!canEdit} onClick={() => toggleTask(task.id)}>
+                            <button className={isDone ? "check checked" : "check"} aria-label={`完成 ${task.title}`} onClick={() => toggleTask(task.id)}>
                               {isDone ? "✓" : ""}
                             </button>
                             <div className="task-main">
