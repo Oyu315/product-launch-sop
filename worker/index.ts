@@ -19,6 +19,32 @@ interface ExecutionContext {
   passThroughOnException(): void;
 }
 
+const SPA_BASE_PATH = "/spa";
+const SPA_INDEX_PATH = `${SPA_BASE_PATH}/index.html`;
+
+function createAssetRequest(request: Request, path: string) {
+  const url = new URL(request.url);
+  url.pathname = path;
+  url.search = "";
+  return new Request(url, request);
+}
+
+async function serveSpa(request: Request, env: Env) {
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return new Response("Method Not Allowed", { status: 405 });
+  }
+
+  const url = new URL(request.url);
+  const assetPath = url.pathname.startsWith(SPA_BASE_PATH) ? url.pathname : SPA_INDEX_PATH;
+  const assetResponse = await env.ASSETS.fetch(createAssetRequest(request, assetPath));
+
+  if (assetResponse.status !== 404) {
+    return assetResponse;
+  }
+
+  return env.ASSETS.fetch(createAssetRequest(request, SPA_INDEX_PATH));
+}
+
 // Image security config. SVG sources with .svg extension auto-skip the
 // optimization endpoint on the client side (served directly, no proxy).
 // To route SVGs through the optimizer (with security headers), set
@@ -40,7 +66,11 @@ const worker = {
       }, allowedWidths);
     }
 
-    return handler.fetch(request, env, ctx);
+    if (url.pathname.startsWith("/api/")) {
+      return handler.fetch(request, env, ctx);
+    }
+
+    return serveSpa(request, env);
   },
 };
 
