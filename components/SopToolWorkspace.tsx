@@ -1,6 +1,8 @@
 "use client";
 
 import { type ClipboardEvent, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import TurndownService from "turndown";
+import { gfm } from "turndown-plugin-gfm";
 
 type Phase = "before" | "submission" | "after";
 type View = "sop" | "platforms" | "editor" | "document";
@@ -314,14 +316,23 @@ function getSharedApiUrl(path: string) {
   return path;
 }
 
-function getClipboardImage(clipboardData: DataTransfer): ClipboardImage | null {
-  const itemFile = Array.from(clipboardData.items)
-    .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
-    .map((item) => item.getAsFile())
-    .find((file): file is File => Boolean(file));
-  if (itemFile) return { kind: "file", file: itemFile };
+function getClipboardImageFiles(clipboardData: DataTransfer) {
+  const files = [
+    ...Array.from(clipboardData.files),
+    ...Array.from(clipboardData.items)
+      .filter((item) => item.kind === "file")
+      .map((item) => item.getAsFile())
+      .filter((file): file is File => Boolean(file)),
+  ].filter((file) => file.type.startsWith("image/"));
 
-  const clipboardFile = Array.from(clipboardData.files).find((file) => file.type.startsWith("image/"));
+  return files.filter((file, index) => files.findIndex((candidate) =>
+    candidate === file ||
+    (candidate.name === file.name && candidate.size === file.size && candidate.type === file.type && candidate.lastModified === file.lastModified)
+  ) === index);
+}
+
+function getClipboardImage(clipboardData: DataTransfer): ClipboardImage | null {
+  const clipboardFile = getClipboardImageFiles(clipboardData)[0];
   if (clipboardFile) return { kind: "file", file: clipboardFile };
 
   const html = clipboardData.getData("text/html");
@@ -335,6 +346,58 @@ function getClipboardImage(clipboardData: DataTransfer): ClipboardImage | null {
     url: source,
     label: image?.getAttribute("alt")?.trim() || image?.getAttribute("title")?.trim() || "粘贴图片",
   };
+}
+
+function shouldImportRichDocument(html: string) {
+  if (!html.trim()) return false;
+  const document = new DOMParser().parseFromString(html, "text/html");
+  const text = document.body.textContent?.replace(/\s+/g, " ").trim() ?? "";
+  return Boolean(text || document.body.querySelectorAll("img").length > 1);
+}
+
+function getRichImageSource(image: HTMLImageElement, baseUrl: string) {
+  const srcset = image.getAttribute("srcset")?.split(",").at(-1)?.trim().split(/\s+/)[0] ?? "";
+  const rawSource = [
+    image.getAttribute("src"),
+    image.getAttribute("data-src"),
+    image.getAttribute("data-original"),
+    srcset,
+  ].find((source) => source?.trim())?.trim() ?? "";
+  if (!rawSource) return "";
+  if (/^\/\//.test(rawSource)) return `https:${rawSource}`;
+  if (/^(https?:\/\/|data:image\/|blob:)/i.test(rawSource)) return rawSource;
+  if (!baseUrl) return "";
+
+  try {
+    return new URL(rawSource, baseUrl).toString();
+  } catch {
+    return "";
+  }
+}
+
+function richDocumentToMarkdown(body: HTMLElement) {
+  const turndown = new TurndownService({
+    bulletListMarker: "-",
+    codeBlockStyle: "fenced",
+    emDelimiter: "*",
+    headingStyle: "atx",
+    strongDelimiter: "**",
+  });
+  turndown.use(gfm);
+  turndown.addRule("documentImages", {
+    filter: "img",
+    replacement: (_content, node) => {
+      const source = node.getAttribute("src")?.trim() ?? "";
+      if (!source) return "";
+      const label = (node.getAttribute("alt")?.trim() || "文档图片").replace(/[\[\]]/g, "");
+      return `\n\n![${label}](${source})\n\n`;
+    },
+  });
+  return turndown
+    .turndown(body)
+    .replace(/\u00a0/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function optimizeImage(file: File) {
@@ -405,6 +468,7 @@ function renderMarkdown(markdown: string) {
   const nodes: ReactNode[] = [];
   let paragraph: string[] = [];
   let listItems: string[] = [];
+  let listType: "ordered" | "unordered" = "unordered";
 
   const flushParagraph = () => {
     if (!paragraph.length) return;
@@ -415,11 +479,16 @@ function renderMarkdown(markdown: string) {
 
   const flushList = () => {
     if (!listItems.length) return;
-    nodes.push(
+    const items = listItems.map((item, index) => <li key={`${item}-${index}`}>{renderInline(item, `li-${nodes.length}-${index}`)}</li>);
+    nodes.push(listType === "ordered" ? (
+      <ol key={`ol-${nodes.length}`}>
+        {items}
+      </ol>
+    ) : (
       <ul key={`ul-${nodes.length}`}>
-        {listItems.map((item, index) => <li key={`${item}-${index}`}>{renderInline(item, `li-${nodes.length}-${index}`)}</li>)}
-      </ul>,
-    );
+        {items}
+      </ul>
+    ));
     listItems = [];
   };
 
@@ -437,6 +506,10 @@ function renderMarkdown(markdown: string) {
           {image[1] && <figcaption>{image[1]}</figcaption>}
         </figure>,
       );
+    } else if (/^#{3,6}\s+/.test(line)) {
+      flushParagraph();
+      flushList();
+      nodes.push(<h3 key={`h3-${nodes.length}`}>{renderInline(line.replace(/^#{3,6}\s+/, ""), `h3-${nodes.length}`)}</h3>);
     } else if (line.startsWith("## ")) {
       flushParagraph();
       flushList();
@@ -447,7 +520,18 @@ function renderMarkdown(markdown: string) {
       nodes.push(<h1 key={`h1-${nodes.length}`}>{renderInline(line.slice(2), `h1-${nodes.length}`)}</h1>);
     } else if (line.startsWith("- ")) {
       flushParagraph();
+      if (listItems.length && listType !== "unordered") flushList();
+      listType = "unordered";
       listItems.push(line.slice(2));
+    } else if (/^\d+\.\s+/.test(line)) {
+      flushParagraph();
+      if (listItems.length && listType !== "ordered") flushList();
+      listType = "ordered";
+      listItems.push(line.replace(/^\d+\.\s+/, ""));
+    } else if (line.startsWith("> ")) {
+      flushParagraph();
+      flushList();
+      nodes.push(<blockquote key={`quote-${nodes.length}`}>{renderInline(line.slice(2), `quote-${nodes.length}`)}</blockquote>);
     } else {
       flushList();
       paragraph.push(line.trim());
@@ -803,14 +887,63 @@ export default function SopToolWorkspace() {
     });
   }
 
+  async function uploadImageFile(file: File) {
+    if (file.size > 10_000_000) {
+      throw new Error("图片超过 10MB，请先压缩后再添加");
+    }
+
+    const dataUrl = await optimizeImage(file);
+    const imageBlob = await fetch(dataUrl).then((response) => response.blob());
+    const formData = new FormData();
+    formData.append("file", imageBlob, `${file.name.replace(/\.[^.]+$/, "") || "pasted-image"}.webp`);
+    const uploadResponse = await fetch(getSharedApiUrl("/api/images"), {
+      method: "POST",
+      headers: { "X-Editor-Key": editorKey },
+      body: formData,
+    });
+    const uploadResult = (await uploadResponse.json()) as { url?: string; error?: string };
+    if (!uploadResponse.ok || !uploadResult.url) throw new Error(uploadResult.error || "图片上传失败");
+    return uploadResult.url;
+  }
+
+  async function uploadImageSource(sourceUrl: string) {
+    if (/^(data:image\/|blob:)/i.test(sourceUrl)) {
+      const response = await fetch(sourceUrl);
+      if (!response.ok) throw new Error("无法读取复制的图片");
+      const blob = await response.blob();
+      if (!blob.type.startsWith("image/")) throw new Error("复制的内容不是图片");
+      const extension = blob.type.split("/")[1]?.replace("jpeg", "jpg") || "png";
+      return uploadImageFile(new File([blob], `粘贴图片.${extension}`, { type: blob.type }));
+    }
+
+    const uploadResponse = await fetch(getSharedApiUrl("/api/images"), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Editor-Key": editorKey,
+      },
+      body: JSON.stringify({ imageUrl: sourceUrl }),
+    });
+    const uploadResult = (await uploadResponse.json()) as { url?: string; error?: string };
+    if (!uploadResponse.ok || !uploadResult.url) throw new Error(uploadResult.error || "图片导入失败");
+    return uploadResult.url;
+  }
+
+  function insertMarkdownAt(moduleId: string, start: number, end: number, content: string) {
+    setModules((current) => current.map((module) => {
+      if (module.id !== moduleId) return module;
+      const safeStart = Math.min(start, module.markdown.length);
+      const safeEnd = Math.min(Math.max(end, safeStart), module.markdown.length);
+      const leading = safeStart > 0 && !module.markdown.slice(0, safeStart).endsWith("\n\n") ? "\n\n" : "";
+      const trailing = safeEnd < module.markdown.length && !module.markdown.slice(safeEnd).startsWith("\n\n") ? "\n\n" : "";
+      return { ...module, markdown: `${module.markdown.slice(0, safeStart)}${leading}${content.trim()}${trailing}${module.markdown.slice(safeEnd)}` };
+    }));
+  }
+
   async function insertMarkdownImage(file?: File) {
     if (!file || isUploadingImage) return;
     if (!canEdit || !editorKey) {
       notify("请先进入编辑模式再添加图片");
-      return;
-    }
-    if (file.size > 10_000_000) {
-      notify("图片超过 10MB，请先压缩后再添加");
       return;
     }
 
@@ -822,26 +955,9 @@ export default function SopToolWorkspace() {
     try {
       setIsUploadingImage(true);
       setToast("正在处理并上传图片");
-      const dataUrl = await optimizeImage(file);
-      const imageBlob = await fetch(dataUrl).then((response) => response.blob());
-      const formData = new FormData();
-      formData.append("file", imageBlob, `${file.name.replace(/\.[^.]+$/, "") || "screenshot"}.webp`);
-      const uploadResponse = await fetch(getSharedApiUrl("/api/images"), {
-        method: "POST",
-        headers: { "X-Editor-Key": editorKey },
-        body: formData,
-      });
-      const uploadResult = (await uploadResponse.json()) as { url?: string; error?: string };
-      if (!uploadResponse.ok || !uploadResult.url) throw new Error(uploadResult.error || "图片上传失败");
-
       const label = file.name.replace(/\.[^.]+$/, "") || "截图";
-      const insertion = `\n\n![${label}](${uploadResult.url})\n\n`;
-      setModules((current) => current.map((module) => {
-        if (module.id !== moduleId) return module;
-        const safeStart = Math.min(start, module.markdown.length);
-        const safeEnd = Math.min(Math.max(end, safeStart), module.markdown.length);
-        return { ...module, markdown: `${module.markdown.slice(0, safeStart)}${insertion}${module.markdown.slice(safeEnd)}` };
-      }));
+      const uploadedUrl = await uploadImageFile(file);
+      insertMarkdownAt(moduleId, start, end, `![${label}](${uploadedUrl})`);
       notify("图片已上传并插入文档");
     } catch (error) {
       notify(error instanceof Error ? error.message : "图片上传失败，请稍后重试");
@@ -852,17 +968,6 @@ export default function SopToolWorkspace() {
 
   async function insertRemoteMarkdownImage(sourceUrl: string, label: string) {
     if (isUploadingImage) return;
-    if (sourceUrl.startsWith("data:image/")) {
-      try {
-        const blob = await fetch(sourceUrl).then((response) => response.blob());
-        const extension = blob.type.split("/")[1]?.replace("jpeg", "jpg") || "png";
-        await insertMarkdownImage(new File([blob], `粘贴图片.${extension}`, { type: blob.type }));
-      } catch {
-        notify("无法读取复制的图片");
-      }
-      return;
-    }
-
     if (!canEdit || !editorKey) {
       notify("请先进入编辑模式再添加图片");
       return;
@@ -876,24 +981,8 @@ export default function SopToolWorkspace() {
     try {
       setIsUploadingImage(true);
       setToast("正在导入并上传图片");
-      const uploadResponse = await fetch(getSharedApiUrl("/api/images"), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Editor-Key": editorKey,
-        },
-        body: JSON.stringify({ imageUrl: sourceUrl }),
-      });
-      const uploadResult = (await uploadResponse.json()) as { url?: string; error?: string };
-      if (!uploadResponse.ok || !uploadResult.url) throw new Error(uploadResult.error || "图片导入失败");
-
-      const insertion = `\n\n![${label.replace(/[\[\]]/g, "") || "粘贴图片"}](${uploadResult.url})\n\n`;
-      setModules((current) => current.map((module) => {
-        if (module.id !== moduleId) return module;
-        const safeStart = Math.min(start, module.markdown.length);
-        const safeEnd = Math.min(Math.max(end, safeStart), module.markdown.length);
-        return { ...module, markdown: `${module.markdown.slice(0, safeStart)}${insertion}${module.markdown.slice(safeEnd)}` };
-      }));
+      const uploadedUrl = await uploadImageSource(sourceUrl);
+      insertMarkdownAt(moduleId, start, end, `![${label.replace(/[\[\]]/g, "") || "粘贴图片"}](${uploadedUrl})`);
       notify("图片已导入并插入文档");
     } catch (error) {
       notify(error instanceof Error ? error.message : "图片导入失败，请稍后重试");
@@ -902,7 +991,96 @@ export default function SopToolWorkspace() {
     }
   }
 
+  async function insertRichMarkdownDocument(html: string, imageFiles: File[], baseUrl: string) {
+    if (isUploadingImage) return;
+    if (!canEdit || !editorKey) {
+      notify("请先进入编辑模式再粘贴文档");
+      return;
+    }
+
+    const textarea = markdownTextareaRef.current;
+    const start = textarea?.selectionStart ?? activeModule.markdown.length;
+    const end = textarea?.selectionEnd ?? start;
+    const moduleId = activeModule.id;
+    const document = new DOMParser().parseFromString(html, "text/html");
+    document.body.querySelectorAll("script, style, noscript, meta, link").forEach((node) => node.remove());
+    document.body.querySelectorAll("a[href]").forEach((link) => {
+      const href = link.getAttribute("href")?.trim() ?? "";
+      if (!baseUrl || !href || /^(https?:\/\/|mailto:|#)/i.test(href)) return;
+      try {
+        link.setAttribute("href", new URL(href, baseUrl).toString());
+      } catch {
+        link.removeAttribute("href");
+      }
+    });
+
+    const images = Array.from(document.body.querySelectorAll("img"));
+    const canMapFiles = imageFiles.length === images.length || images.length === 1;
+    let importedImages = 0;
+
+    try {
+      setIsUploadingImage(true);
+      setToast(images.length ? `正在导入整篇文档 · 0/${images.length} 张图片` : "正在导入整篇文档");
+
+      for (let index = 0; index < images.length; index += 1) {
+        const image = images[index];
+        const source = getRichImageSource(image, baseUrl);
+        const fallbackFile = canMapFiles ? imageFiles[index] ?? imageFiles[0] : undefined;
+        const label = image.getAttribute("alt")?.trim() || image.getAttribute("title")?.trim() || `图片 ${index + 1}`;
+
+        try {
+          let uploadedUrl = "";
+          if (source) {
+            try {
+              uploadedUrl = await uploadImageSource(source);
+            } catch (error) {
+              if (!fallbackFile) throw error;
+              uploadedUrl = await uploadImageFile(fallbackFile);
+            }
+          } else if (fallbackFile) {
+            uploadedUrl = await uploadImageFile(fallbackFile);
+          } else {
+            throw new Error("剪贴板未提供该图片的数据");
+          }
+
+          image.setAttribute("src", uploadedUrl);
+          image.setAttribute("alt", label);
+          image.removeAttribute("srcset");
+          image.removeAttribute("data-src");
+          image.removeAttribute("data-original");
+          importedImages += 1;
+        } catch {
+          const failed = document.createElement("p");
+          failed.textContent = `[图片未导入：${label}]`;
+          image.replaceWith(failed);
+        }
+
+        setToast(`正在导入整篇文档 · ${index + 1}/${images.length} 张图片`);
+      }
+
+      const markdown = richDocumentToMarkdown(document.body);
+      if (!markdown) throw new Error("没有识别到可导入的文档内容");
+      insertMarkdownAt(moduleId, start, end, markdown);
+      notify(images.length === importedImages ? `整篇文档已导入，共 ${importedImages} 张图片` : `文档已导入，图片成功 ${importedImages}/${images.length}`);
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "整篇文档导入失败");
+    } finally {
+      setIsUploadingImage(false);
+    }
+  }
+
   function handleMarkdownPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const html = event.clipboardData.getData("text/html");
+    if (shouldImportRichDocument(html)) {
+      const imageFiles = getClipboardImageFiles(event.clipboardData);
+      const baseUrl = event.clipboardData.getData("text/uri-list")
+        .split(/\r?\n/)
+        .find((line) => /^https?:\/\//i.test(line.trim()))?.trim() ?? "";
+      event.preventDefault();
+      void insertRichMarkdownDocument(html, imageFiles, baseUrl);
+      return;
+    }
+
     const clipboardImage = getClipboardImage(event.clipboardData);
     if (!clipboardImage) return;
     event.preventDefault();

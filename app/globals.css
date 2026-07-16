@@ -1169,6 +1169,13 @@ nav { display: grid; gap: 6px; }
   letter-spacing: 0;
 }
 
+.markdown-rendered h3 {
+  margin: 22px 0 8px;
+  color: #29434a;
+  font-size: 16px;
+  line-height: 1.5;
+}
+
 .markdown-rendered h1:first-child,
 .markdown-rendered h2:first-child { margin-top: 0; }
 
@@ -1186,11 +1193,20 @@ nav { display: grid; gap: 6px; }
   text-underline-offset: 3px;
 }
 
-.markdown-rendered ul {
+.markdown-rendered ul,
+.markdown-rendered ol {
   display: grid;
   gap: 8px;
   margin: 0 0 18px;
   padding-left: 20px;
+}
+
+.markdown-rendered blockquote {
+  margin: 14px 0;
+  padding: 10px 14px;
+  border-left: 3px solid #9eb4d3;
+  background: #f5f7fa;
+  color: #5b6d74;
 }
 
 .markdown-rendered figure {
