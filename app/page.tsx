@@ -1,8 +1,11 @@
-import dynamic from "next/dynamic";
+"use client";
 
-const SopToolClient = dynamic(() => import("./SopToolClient"), {
-  ssr: false,
-  loading: () => (
+import { useEffect, useState } from "react";
+
+type WorkspaceComponent = typeof import("../components/SopToolWorkspace").default;
+
+function LoadingShell() {
+  return (
     <main className="app-shell">
       <div className="content">
         <section className="tool-header">
@@ -14,9 +17,23 @@ const SopToolClient = dynamic(() => import("./SopToolClient"), {
         </section>
       </div>
     </main>
-  ),
-});
+  );
+}
 
 export default function Page() {
-  return <SopToolClient />;
+  const [Workspace, setWorkspace] = useState<WorkspaceComponent | null>(null);
+
+  useEffect(() => {
+    let active = true;
+
+    void import("../components/SopToolWorkspace").then((module) => {
+      if (active) setWorkspace(() => module.default);
+    });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  return Workspace ? <Workspace /> : <LoadingShell />;
 }

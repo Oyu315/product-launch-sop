@@ -467,7 +467,7 @@ function normalizeModules(rawModules: SavedModule[]): PlatformModule[] {
   });
 }
 
-export default function SopToolClient() {
+export default function SopToolWorkspace() {
   const [activeView, setActiveView] = useState<View>("sop");
   const [selectedPlatform, setSelectedPlatform] = useState(ALL_PLATFORMS);
   const [completed, setCompleted] = useState<string[]>(["version-scope"]);
