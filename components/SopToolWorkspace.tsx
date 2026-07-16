@@ -47,6 +47,10 @@ type SharedResponse = {
   error?: string;
 };
 
+type ClipboardImage =
+  | { kind: "file"; file: File }
+  | { kind: "remote"; url: string; label: string };
+
 const STORAGE_KEY = "product-launch-sop-tool-v2";
 const PUBLIC_PROGRESS_STORAGE = "product-launch-sop-public-progress-v1";
 const EDITOR_KEY_STORAGE = "product-launch-sop-editor-key";
@@ -310,6 +314,29 @@ function getSharedApiUrl(path: string) {
   return path;
 }
 
+function getClipboardImage(clipboardData: DataTransfer): ClipboardImage | null {
+  const itemFile = Array.from(clipboardData.items)
+    .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+    .map((item) => item.getAsFile())
+    .find((file): file is File => Boolean(file));
+  if (itemFile) return { kind: "file", file: itemFile };
+
+  const clipboardFile = Array.from(clipboardData.files).find((file) => file.type.startsWith("image/"));
+  if (clipboardFile) return { kind: "file", file: clipboardFile };
+
+  const html = clipboardData.getData("text/html");
+  if (!html) return null;
+  const image = new DOMParser().parseFromString(html, "text/html").querySelector("img[src]");
+  const source = image?.getAttribute("src")?.trim() ?? "";
+  if (!/^(https?:\/\/|data:image\/)/i.test(source)) return null;
+
+  return {
+    kind: "remote",
+    url: source,
+    label: image?.getAttribute("alt")?.trim() || image?.getAttribute("title")?.trim() || "粘贴图片",
+  };
+}
+
 function optimizeImage(file: File) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader();
@@ -483,6 +510,7 @@ export default function SopToolWorkspace() {
   const [loaded, setLoaded] = useState(false);
   const [editorKey, setEditorKey] = useState("");
   const [canEdit, setCanEdit] = useState(false);
+  const [isUploadingImage, setIsUploadingImage] = useState(false);
   const [syncStatus, setSyncStatus] = useState<"loading" | "readonly" | "saving" | "saved" | "offline">("loading");
   const markdownTextareaRef = useRef<HTMLTextAreaElement>(null);
   const markdownImageInputRef = useRef<HTMLInputElement>(null);
@@ -776,7 +804,11 @@ export default function SopToolWorkspace() {
   }
 
   async function insertMarkdownImage(file?: File) {
-    if (!file) return;
+    if (!file || isUploadingImage) return;
+    if (!canEdit || !editorKey) {
+      notify("请先进入编辑模式再添加图片");
+      return;
+    }
     if (file.size > 10_000_000) {
       notify("图片超过 10MB，请先压缩后再添加");
       return;
@@ -788,6 +820,8 @@ export default function SopToolWorkspace() {
     const moduleId = activeModule.id;
 
     try {
+      setIsUploadingImage(true);
+      setToast("正在处理并上传图片");
       const dataUrl = await optimizeImage(file);
       const imageBlob = await fetch(dataUrl).then((response) => response.blob());
       const formData = new FormData();
@@ -809,17 +843,74 @@ export default function SopToolWorkspace() {
         return { ...module, markdown: `${module.markdown.slice(0, safeStart)}${insertion}${module.markdown.slice(safeEnd)}` };
       }));
       notify("图片已上传并插入文档");
-    } catch {
-      notify("图片上传失败，请稍后重试");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "图片上传失败，请稍后重试");
+    } finally {
+      setIsUploadingImage(false);
+    }
+  }
+
+  async function insertRemoteMarkdownImage(sourceUrl: string, label: string) {
+    if (isUploadingImage) return;
+    if (sourceUrl.startsWith("data:image/")) {
+      try {
+        const blob = await fetch(sourceUrl).then((response) => response.blob());
+        const extension = blob.type.split("/")[1]?.replace("jpeg", "jpg") || "png";
+        await insertMarkdownImage(new File([blob], `粘贴图片.${extension}`, { type: blob.type }));
+      } catch {
+        notify("无法读取复制的图片");
+      }
+      return;
+    }
+
+    if (!canEdit || !editorKey) {
+      notify("请先进入编辑模式再添加图片");
+      return;
+    }
+
+    const textarea = markdownTextareaRef.current;
+    const start = textarea?.selectionStart ?? activeModule.markdown.length;
+    const end = textarea?.selectionEnd ?? start;
+    const moduleId = activeModule.id;
+
+    try {
+      setIsUploadingImage(true);
+      setToast("正在导入并上传图片");
+      const uploadResponse = await fetch(getSharedApiUrl("/api/images"), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Editor-Key": editorKey,
+        },
+        body: JSON.stringify({ imageUrl: sourceUrl }),
+      });
+      const uploadResult = (await uploadResponse.json()) as { url?: string; error?: string };
+      if (!uploadResponse.ok || !uploadResult.url) throw new Error(uploadResult.error || "图片导入失败");
+
+      const insertion = `\n\n![${label.replace(/[\[\]]/g, "") || "粘贴图片"}](${uploadResult.url})\n\n`;
+      setModules((current) => current.map((module) => {
+        if (module.id !== moduleId) return module;
+        const safeStart = Math.min(start, module.markdown.length);
+        const safeEnd = Math.min(Math.max(end, safeStart), module.markdown.length);
+        return { ...module, markdown: `${module.markdown.slice(0, safeStart)}${insertion}${module.markdown.slice(safeEnd)}` };
+      }));
+      notify("图片已导入并插入文档");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "图片导入失败，请稍后重试");
+    } finally {
+      setIsUploadingImage(false);
     }
   }
 
   function handleMarkdownPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
-    const imageItem = Array.from(event.clipboardData.items).find((item) => item.type.startsWith("image/"));
-    const imageFile = imageItem?.getAsFile();
-    if (!imageFile) return;
+    const clipboardImage = getClipboardImage(event.clipboardData);
+    if (!clipboardImage) return;
     event.preventDefault();
-    void insertMarkdownImage(imageFile);
+    if (clipboardImage.kind === "file") {
+      void insertMarkdownImage(clipboardImage.file);
+    } else {
+      void insertRemoteMarkdownImage(clipboardImage.url, clipboardImage.label);
+    }
   }
 
   function addModule() {
@@ -1243,7 +1334,7 @@ export default function SopToolWorkspace() {
                       />
                     ))}
                     <span className="toolbar-separator" />
-                    <button title="添加图片" onClick={() => markdownImageInputRef.current?.click()}>▧</button>
+                    <button title={isUploadingImage ? "图片上传中" : "添加图片"} disabled={isUploadingImage} onClick={() => markdownImageInputRef.current?.click()}>▧</button>
                     <input
                       ref={markdownImageInputRef}
                       className="visually-hidden"

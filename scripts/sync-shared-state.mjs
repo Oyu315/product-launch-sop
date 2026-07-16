@@ -46,7 +46,7 @@ try {
       }
 
       const contentType = imageResponse.headers.get("content-type") ?? "image/webp";
-      const extension = contentType.includes("png") ? "png" : contentType.includes("jpeg") ? "jpg" : contentType.includes("gif") ? "gif" : "webp";
+      const extension = contentType.includes("avif") ? "avif" : contentType.includes("png") ? "png" : contentType.includes("jpeg") ? "jpg" : contentType.includes("gif") ? "gif" : contentType.includes("svg") ? "svg" : "webp";
       const fileName = `${createHash("sha256").update(imageUrl).digest("hex").slice(0, 20)}.${extension}`;
       const imageBytes = Buffer.from(await imageResponse.arrayBuffer());
       await writeFile(path.join(assetsDirectory, fileName), imageBytes);
